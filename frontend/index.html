@@ -575,8 +575,23 @@
         let ws;
         let isConnected = false;
 
+        // Auto-detect WebSocket URL: wss:// for deployed, ws:// for localhost
+        const WS_URL = (() => {
+            if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+                return 'ws://localhost:8000/ws';
+            }
+            // Deployed: use Railway backend URL (update this after Railway deploy)
+            const RAILWAY_HOST = 'RAILWAY_URL_PLACEHOLDER';
+            if (RAILWAY_HOST.includes('PLACEHOLDER')) {
+                // Fallback: assume backend is on same host
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                return `${proto}//${location.host}/ws`;
+            }
+            return `wss://${RAILWAY_HOST}/ws`;
+        })();
+
         function connectWS() {
-            ws = new WebSocket('ws://localhost:8000/ws');
+            ws = new WebSocket(WS_URL);
             
             ws.onopen = () => {
                 isConnected = true;
