@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AURA | AI-Powered Sales Intelligence</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #050505;
+            --text-color: #FFFFFF;
+            --accent-color: #39FF14;
+            --border-color: rgba(57, 255, 20, 0.2);
+            --card-bg: rgba(255, 255, 255, 0.03);
+            --font-ui: 'Inter', sans-serif;
+            --font-mono: 'Space Mono', monospace;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-ui);
+            height: 100vh;
+            overflow: hidden;
+            background-image: linear-gradient(rgba(57, 255, 20, 0.03) 1px, transparent 1px),
+                              linear-gradient(90deg, rgba(57, 255, 20, 0.03) 1px, transparent 1px);
+            background-size: 30px 30px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Scanline Overlay */
+        body::after {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 2;
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            height: 80px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 40px;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(5, 5, 5, 0.8);
+            backdrop-filter: blur(10px);
+            z-index: 10;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: baseline;
+            gap: 20px;
+        }
+
+        .logo {
+            font-size: 32px;
+            font-weight: 800;
+            color: var(--accent-color);
+            letter-spacing: 8px;
+            text-shadow: 0 0 10px rgba(57, 255, 20, 0.5);
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.6);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+        }
+
+        .demo-indicator {
+            display: none;
+            color: var(--accent-color);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            border: 1px solid var(--accent-color);
+            padding: 4px 10px;
+            animation: flash 1s infinite alternate;
+        }
+
+        @keyframes flash {
+            from { opacity: 0.3; }
+            to { opacity: 1; }
+        }
+
+        .transcript {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.5);
+            max-width: 300px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .mic-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s;
+        }
+
+        .mic-btn svg { width: 20px; height: 20px; fill: currentColor; }
+
+        .mic-btn.recording {
+            border-color: #ff3333;
+            color: #ff3333;
+            animation: pulse-red 1.5s infinite;
+        }
+
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(255, 51, 51, 0.4); }
+            70% { box-shadow: 0 0 0 15px rgba(255, 51, 51, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 51, 51, 0); }
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ff3333; /* disconnected by default */
+            box-shadow: 0 0 8px #ff3333;
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        .status-dot.connected {
+            background-color: var(--accent-color);
+            box-shadow: 0 0 8px var(--accent-color);
+        }
+
+        /* Main Layout */
+        .main-container {
+            display: flex;
+            flex: 1;
+            padding: 20px;
+            gap: 20px;
+            height: calc(100vh - 80px);
+            z-index: 10;
+        }
+
+        .panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .left-panel {
+            width: 50%;
+            height: 100%;
+        }
+
+        .right-panel {
+            width: 50%;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .right-top { height: 60%; }
+        .right-bottom { height: 40%; display: flex; gap: 20px; }
+        .right-bottom > div { flex: 1; background: var(--card-bg); border: 1px solid var(--border-color); display: flex; flex-direction: column; }
+
+        /* Headers */
+        .panel-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border-color);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--accent-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .header-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--accent-color);
+            border-radius: 50%;
+            animation: pulse-green 2s infinite;
+        }
+
+        @keyframes pulse-green {
+            0% { opacity: 0.5; box-shadow: 0 0 0 0 rgba(57, 255, 20, 0.4); }
+            50% { opacity: 1; box-shadow: 0 0 0 5px rgba(57, 255, 20, 0); }
+            100% { opacity: 0.5; box-shadow: 0 0 0 0 rgba(57, 255, 20, 0); }
+        }
+
+        /* Agent Logs */
+        .logs-container {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .log-entry {
+            margin-bottom: 15px;
+            opacity: 0.5;
+            transition: opacity 0.5s ease;
+            padding: 8px 0;
+            border-left: 2px solid transparent;
+            padding-left: 12px;
+        }
+
+        .log-entry.active {
+            color: var(--accent-color);
+            opacity: 1;
+            border-left-color: var(--accent-color);
+            text-shadow: 0 0 8px rgba(57, 255, 20, 0.3);
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 15px;
+            background: var(--accent-color);
+            vertical-align: middle;
+            animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink { 50% { opacity: 0; } }
+
+        /* Order Card */
+        .order-content {
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .data-item {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.5s ease;
+        }
+
+        .data-item.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .data-label {
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.5);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .data-value {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .stock-indicator {
+            margin-top: 10px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .stock-bar {
+            height: 100%;
+            width: 0%;
+            transition: width 1s cubic-bezier(0.1, 0.8, 0.2, 1);
+        }
+
+        .badge-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 10px;
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+
+        .badge-container.visible { opacity: 1; }
+
+        .rec-badge {
+            padding: 10px 28px;
+            border-radius: 50px;
+            font-size: 14px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            animation: badge-glow 2s ease-in-out infinite;
+        }
+
+        .rec-badge.accept { color: var(--accent-color); border: 1px solid var(--accent-color); background: rgba(57, 255, 20, 0.1); }
+        .rec-badge.counter { color: #FFB347; border: 2px solid #FFA500; background: rgba(255, 165, 0, 0.12); }
+        .rec-badge.upsell { color: #00BFFF; border: 1px solid #00BFFF; background: rgba(0, 191, 255, 0.1); }
+
+        @keyframes badge-glow {
+            0%, 100% { box-shadow: 0 0 15px currentColor; }
+            50% { box-shadow: 0 0 30px currentColor, 0 0 50px currentColor; }
+        }
+
+        .confirm-btn {
+            background: var(--accent-color);
+            border: 2px solid var(--accent-color);
+            color: var(--bg-color);
+            padding: 18px 32px;
+            font-family: var(--font-ui);
+            font-size: 18px;
+            font-weight: 800;
+            letter-spacing: 3px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            margin-top: auto;
+            display: none;
+            box-shadow: 0 0 25px rgba(57, 255, 20, 0.4), inset 0 0 25px rgba(57, 255, 20, 0.1);
+            animation: pulse-confirm 2s infinite;
+        }
+
+        .confirm-btn.visible { display: block; }
+        .confirm-btn:hover {
+            background: #fff;
+            color: var(--bg-color);
+            border-color: #fff;
+            box-shadow: 0 0 40px rgba(255, 255, 255, 0.5);
+        }
+
+        @keyframes pulse-confirm {
+            0% { box-shadow: 0 0 20px rgba(57, 255, 20, 0.3), inset 0 0 20px rgba(57, 255, 20, 0.05); }
+            50% { box-shadow: 0 0 40px rgba(57, 255, 20, 0.6), inset 0 0 30px rgba(57, 255, 20, 0.15); }
+            100% { box-shadow: 0 0 20px rgba(57, 255, 20, 0.3), inset 0 0 20px rgba(57, 255, 20, 0.05); }
+        }
+
+        /* Email Preview */
+        .email-preview {
+            background: linear-gradient(135deg, #fefefe 0%, #f8f6f2 100%);
+            color: #1a1a1a;
+            padding: 35px 30px;
+            border-radius: 2px;
+            border-left: 3px solid #c9a96e;
+            font-family: 'Cormorant Garamond', Georgia, serif;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.8s ease;
+            margin-top: 20px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+        }
+
+        .email-preview.visible { display: block; opacity: 1; }
+        .email-header { border-bottom: 1px solid #d4c5a9; padding-bottom: 12px; margin-bottom: 20px; font-family: var(--font-ui); font-size: 11px; color: #8a7e6b; letter-spacing: 0.5px; text-transform: uppercase; }
+        .email-body { font-size: 16px; line-height: 1.9; letter-spacing: 0.2px; }
+
+        /* Lists (Inventory & Orders) */
+        .list-container {
+            padding: 15px;
+            overflow-y: auto;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .inv-name { flex: 1; }
+        .inv-stock-container { width: 60px; height: 4px; background: rgba(255,255,255,0.1); margin-left: 10px; border-radius: 2px; }
+        .inv-stock-fill { height: 100%; transition: width 1s; }
+
+        .order-buyer { color: rgba(255,255,255,0.6); }
+        .order-price { color: var(--accent-color); font-family: var(--font-mono); }
+
+        .total-revenue {
+            padding: 15px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+        }
+        
+        .rev-amount {
+            color: var(--accent-color);
+            font-family: var(--font-mono);
+            font-size: 18px;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.02); }
+        ::-webkit-scrollbar-thumb { background: rgba(57, 255, 20, 0.3); border-radius: 4px; }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: rgba(255, 51, 51, 0.1);
+            border: 1px solid #ff3333;
+            color: #ff3333;
+            padding: 10px 20px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            transition: transform 0.3s;
+            z-index: 100;
+        }
+        .toast.show { transform: translateX(-50%) translateY(0); }
+
+        @media (max-width: 1024px) {
+            .main-container { flex-direction: column; height: auto; overflow-y: auto; }
+            .left-panel, .right-panel { width: 100%; height: 500px; }
+            body { overflow: auto; }
+            .right-bottom { flex-direction: column; height: auto; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="top-bar">
+        <div class="logo-container">
+            <div class="logo">AURA</div>
+            <div class="subtitle">AI-Powered Sales Intelligence — Paris Fashion Week</div>
+        </div>
+        <div class="controls">
+            <div class="demo-indicator" id="demoIndicator">DEMO MODE ACTIVE</div>
+            <div class="transcript" id="transcriptDisplay">Waiting for audio...</div>
+            <button class="mic-btn" id="micBtn" title="Hold to record">
+                <svg viewBox="0 0 24 24">
+                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                </svg>
+            </button>
+            <div class="status-dot" id="wsStatus" title="Disconnected"></div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- Left Panel: Agent Logs -->
+        <div class="panel left-panel">
+            <div class="panel-header">
+                <div class="header-dot"></div>
+                AURA PIPELINE
+            </div>
+            <div class="logs-container" id="logsContainer">
+                <!-- Logs will be injected here -->
+            </div>
+        </div>
+
+        <!-- Right Panels -->
+        <div class="right-panel">
+            <!-- Right Top: Active Order Card -->
+            <div class="panel right-top">
+                <div class="panel-header">ACTIVE DEAL ANALYSIS</div>
+                <div class="order-content" id="orderContent">
+                    <div class="data-grid">
+                        <div class="data-item" id="di-buyer">
+                            <span class="data-label">Buyer</span>
+                            <span class="data-value" id="val-buyer">--</span>
+                        </div>
+                        <div class="data-item" id="di-store">
+                            <span class="data-label">Store</span>
+                            <span class="data-value" id="val-store">--</span>
+                        </div>
+                        <div class="data-item" id="di-item">
+                            <span class="data-label">Item Model</span>
+                            <span class="data-value" id="val-item">--</span>
+                            <div class="stock-indicator"><div class="stock-bar" id="stockBar"></div></div>
+                        </div>
+                        <div class="data-item" id="di-qty">
+                            <span class="data-label">Quantity / Price</span>
+                            <span class="data-value" id="val-qty-price">--</span>
+                        </div>
+                    </div>
+                    
+                    <div class="badge-container" id="badgeContainer">
+                        <span class="data-label">AURA Recommendation</span>
+                        <div class="rec-badge" id="recBadge">ANALYZING</div>
+                    </div>
+
+                    <div class="email-preview" id="emailPreview">
+                        <div class="email-header">
+                            To: <span id="em-to"></span><br>
+                            Subject: <span id="em-sub"></span>
+                        </div>
+                        <div class="email-body" id="em-body"></div>
+                    </div>
+
+                    <button class="confirm-btn" id="confirmBtn">CONFIRM ORDER</button>
+                </div>
+            </div>
+
+            <!-- Right Bottom: Widgets -->
+            <div class="right-bottom">
+                <div class="panel">
+                    <div class="panel-header">LIVE INVENTORY</div>
+                    <div class="list-container" id="inventoryList">
+                        <!-- Inventory injected here -->
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-header">CONFIRMED ORDERS</div>
+                    <div class="list-container" id="ordersList">
+                        <!-- Orders injected here -->
+                    </div>
+                    <div class="total-revenue">
+                        <span>TOTAL REVENUE</span>
+                        <span class="rev-amount" id="totalRev">€0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">Error message</div>
+
+    <script>
+        // DOM Elements
+        const wsStatus = document.getElementById('wsStatus');
+        const micBtn = document.getElementById('micBtn');
+        const transcriptDisplay = document.getElementById('transcriptDisplay');
+        const logsContainer = document.getElementById('logsContainer');
+        const demoIndicator = document.getElementById('demoIndicator');
+        const toast = document.getElementById('toast');
+        
+        const confirmBtn = document.getElementById('confirmBtn');
+        const badgeContainer = document.getElementById('badgeContainer');
+        const recBadge = document.getElementById('recBadge');
+        const stockBar = document.getElementById('stockBar');
+        const emailPreview = document.getElementById('emailPreview');
+
+        // WebSocket Setup
+        let ws;
+        let isConnected = false;
+
+        function connectWS() {
+            ws = new WebSocket('ws://localhost:8000/ws');
+            
+            ws.onopen = () => {
+                isConnected = true;
+                wsStatus.classList.add('connected');
+                wsStatus.title = "Connected";
+                ws.send(JSON.stringify({ type: 'get_inventory' }));
+            };
+
+            ws.onclose = () => {
+                isConnected = false;
+                wsStatus.classList.remove('connected');
+                wsStatus.title = "Disconnected";
+                setTimeout(connectWS, 3000); // Reconnect
+            };
+
+            ws.onerror = (err) => {
+                showError("WebSocket connection error");
+            };
+
+            ws.onmessage = async (event) => {
+                // If it's Blob, it might be binary audio, but backend sends JSON
+                if (event.data instanceof Blob) return;
+                
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                } catch(e) {
+                    console.error("Failed to parse message", e);
+                }
+            };
+        }
+
+        // Message Handler
+        function handleMessage(msg) {
+            switch(msg.type) {
+                case 'agent_log':
+                    appendLog(msg.agent, msg.label, msg.content, msg.data);
+                    break;
+                case 'recommendation':
+                    updateOrderCard(msg);
+                    showRecommendation(msg.action);
+                    break;
+                case 'confirmation_email':
+                    showEmail(msg.content);
+                    break;
+                case 'tts_audio':
+                    playAudio(msg.audio);
+                    break;
+                case 'inventory':
+                    renderInventory(msg.items);
+                    break;
+                case 'orders':
+                    renderOrders(msg.orders, msg.total_revenue);
+                    break;
+                case 'transcript':
+                    transcriptDisplay.textContent = msg.text;
+                    if(msg.is_final) transcriptDisplay.style.color = "var(--text-color)";
+                    else transcriptDisplay.style.color = "rgba(255, 255, 255, 0.5)";
+                    break;
+                case 'error':
+                    showError(msg.message);
+                    break;
+                case 'recording_started':
+                    console.log('Recording session started on backend');
+                    break;
+                case 'recording_stopped':
+                    console.log('Recording session stopped on backend');
+                    break;
+            }
+        }
+
+        // Audio Recording
+        let mediaRecorder;
+        let isRecording = false;
+
+        micBtn.addEventListener('click', toggleRecording);
+
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+
+        async function startRecording() {
+            if(!isConnected) return showError("Not connected to backend");
+            try {
+                ws.send(JSON.stringify({ type: 'start_recording' }));
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true } 
+                });
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                        ws.send(e.data);
+                    }
+                };
+
+                mediaRecorder.start(250);
+                micBtn.classList.add('recording');
+                isRecording = true;
+                transcriptDisplay.textContent = "Listening...";
+                transcriptDisplay.style.color = "rgba(255, 255, 255, 0.5)";
+            } catch(e) {
+                showError("Microphone access denied");
+            }
+        }
+
+        function stopRecording() {
+            if(mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(t => t.stop());
+                micBtn.classList.remove('recording');
+                isRecording = false;
+                if(ws && isConnected) {
+                    ws.send(JSON.stringify({ type: 'stop_recording' }));
+                }
+            }
+        }
+
+        // Audio Playback
+        async function playAudio(base64Audio) {
+            try {
+                const audioData = atob(base64Audio);
+                const arrayBuffer = new ArrayBuffer(audioData.length);
+                const view = new Uint8Array(arrayBuffer);
+                for (let i = 0; i < audioData.length; i++) {
+                    view[i] = audioData.charCodeAt(i);
+                }
+                
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                const source = audioCtx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioCtx.destination);
+                source.start(0);
+            } catch(e) {
+                console.error("Failed to play audio", e);
+            }
+        }
+
+        // UI Updates
+        let activeLogEl = null;
+
+        function appendLog(agentNum, label, content, data) {
+            if(activeLogEl) {
+                activeLogEl.classList.remove('active');
+                const cursor = activeLogEl.querySelector('.cursor');
+                if(cursor) cursor.remove();
+            }
+
+            const div = document.createElement('div');
+            div.className = 'log-entry active';
+            const prefix = `[AGENT ${agentNum} — ${label}] `;
+            div.innerHTML = `<span style="color: rgba(255,255,255,0.4)">${prefix}</span><span class="text-content"></span><span class="cursor"></span>`;
+            logsContainer.appendChild(div);
+            
+            // Auto scroll
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+            activeLogEl = div;
+
+            const textSpan = div.querySelector('.text-content');
+            let i = 0;
+            const fullText = content;
+            
+            function typeWriter() {
+                if(i < fullText.length) {
+                    textSpan.textContent += fullText.charAt(i);
+                    i++;
+                    logsContainer.scrollTop = logsContainer.scrollHeight;
+                    setTimeout(typeWriter, 20);
+                }
+            }
+            typeWriter();
+        }
+
+        // Store current recommendation message for use by confirm
+        let currentRec = null;
+
+        function updateOrderCard(msg) {
+            currentRec = msg;
+            const ext = msg.extracted || {};
+            const inv = msg.inventory || {};
+            const strategy = msg.data || {};
+
+            if(ext.buyer) {
+                document.getElementById('val-buyer').textContent = ext.buyer;
+                document.getElementById('di-buyer').classList.add('visible');
+            }
+            if(ext.store) {
+                document.getElementById('val-store').textContent = ext.store;
+                document.getElementById('di-store').classList.add('visible');
+            }
+            if(ext.item) {
+                document.getElementById('val-item').textContent = ext.item + (inv.collection ? ` — ${inv.collection}` : '');
+                document.getElementById('di-item').classList.add('visible');
+                
+                // Stock bar from inventory data
+                const maxStock = Math.max(inv.available_qty || 0, inv.requested_qty || 1);
+                const stockPercent = inv.available_qty ? Math.round((inv.available_qty / maxStock) * 100) : 0;
+                stockBar.style.width = `${stockPercent}%`;
+                // Color based on whether stock is sufficient
+                if (inv.stock_sufficient === false) {
+                    stockBar.style.background = '#ff3333';
+                } else if(stockPercent > 75) {
+                    stockBar.style.background = 'var(--accent-color)';
+                } else if(stockPercent > 25) {
+                    stockBar.style.background = '#FFA500';
+                } else {
+                    stockBar.style.background = '#ff3333';
+                }
+            }
+            const qty = strategy.suggested_quantity || ext.quantity;
+            const price = strategy.suggested_price || ext.price;
+            if(qty && price) {
+                document.getElementById('val-qty-price').textContent = `${qty} units @ €${Number(price).toLocaleString()}`;
+                document.getElementById('di-qty').classList.add('visible');
+            }
+        }
+
+        function showRecommendation(action) {
+            badgeContainer.classList.add('visible');
+            recBadge.className = `rec-badge ${action.toLowerCase()}`;
+            const labels = { ACCEPT: 'ACCEPT', COUNTER: 'COUNTER-OFFER', UPSELL: 'UPSELL' };
+            recBadge.textContent = labels[action] || action;
+            confirmBtn.classList.add('visible');
+        }
+
+        confirmBtn.addEventListener('click', () => {
+            if(ws && isConnected) {
+                ws.send(JSON.stringify({ type: 'confirm' }));
+                confirmBtn.textContent = "CONFIRMED";
+                confirmBtn.style.pointerEvents = "none";
+                confirmBtn.style.background = "var(--accent-color)";
+                confirmBtn.style.color = "var(--bg-color)";
+                confirmBtn.style.animation = "none";
+                demoIndicator.style.display = 'none';
+            }
+        });
+
+        function showEmail(content) {
+            // Backend sends raw email text as a string
+            const lines = (typeof content === 'string' ? content : '').split('\n');
+            let subject = '';
+            let body = '';
+            let inBody = false;
+            for (const line of lines) {
+                if (line.startsWith('Subject:')) {
+                    subject = line.replace('Subject:', '').trim();
+                } else if (line.startsWith('Dear') || inBody) {
+                    inBody = true;
+                    body += line + '\n';
+                }
+            }
+            const buyerName = currentRec?.extracted?.buyer || 'Client';
+            document.getElementById('em-to').textContent = buyerName;
+            document.getElementById('em-sub').textContent = subject || 'Order Confirmation';
+            document.getElementById('em-body').innerHTML = (body || content || '')
+                .split('\n\n')
+                .filter(p => p.trim())
+                .map(p => `<p style="margin: 0 0 14px 0">${p.replace(/\n/g, '<br>')}</p>`)
+                .join('');
+            emailPreview.classList.add('visible');
+        }
+
+        function renderInventory(items) {
+            const container = document.getElementById('inventoryList');
+            container.innerHTML = '';
+            const maxStock = Math.max(...items.map(i => i.stock_qty || 0), 1);
+            items.forEach(item => {
+                const pct = ((item.stock_qty || 0) / maxStock) * 100;
+                let color = pct > 75 ? 'var(--accent-color)' : (pct > 25 ? '#FFA500' : '#ff3333');
+                const critical = item.stock_qty === 0;
+                
+                container.innerHTML += `
+                    <div class="list-item" style="${critical ? 'background: rgba(255,51,51,0.08); border-bottom-color: rgba(255,51,51,0.2);' : ''}">
+                        <span class="inv-name" style="${critical ? 'color: #ff3333; font-weight: 600;' : ''}">${item.item_name}</span>
+                        <span style="font-family: var(--font-mono); min-width: 30px; text-align: right; ${critical ? 'color: #ff3333; font-weight: 600;' : ''}">${item.stock_qty}</span>
+                        <div class="inv-stock-container">
+                            <div class="inv-stock-fill" style="width: ${pct}%; background: ${color}"></div>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        // Animate numbers count up
+        function animateValue(obj, start, end, duration) {
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                obj.innerHTML = "€" + Math.floor(progress * (end - start) + start).toLocaleString();
+                if (progress < 1) {
+                    window.requestAnimationFrame(step);
+                }
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        function renderOrders(orders, totalRev) {
+            const container = document.getElementById('ordersList');
+            container.innerHTML = '';
+            if (orders.length === 0) {
+                container.innerHTML = '<div style="color: rgba(255,255,255,0.3); font-size: 12px; text-align: center; padding: 20px;">No confirmed orders yet</div>';
+            }
+            orders.forEach(o => {
+                const total = (o.agreed_price_eur || 0) * (o.quantity || 0);
+                container.innerHTML += `
+                    <div class="list-item">
+                        <span class="order-buyer">${o.buyer_name}</span>
+                        <span>${o.item_name} (x${o.quantity})</span>
+                        <span class="order-price">&euro;${total.toLocaleString()}</span>
+                    </div>
+                `;
+            });
+
+            const revEl = document.getElementById('totalRev');
+            const currentRev = parseInt(revEl.textContent.replace(/\D/g,'')) || 0;
+            animateValue(revEl, currentRev, totalRev, 1000);
+        }
+
+        function showError(msg) {
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Demo Mode (Shift+D)
+        document.addEventListener('keydown', (e) => {
+            if(e.shiftKey && e.key.toLowerCase() === 'd') {
+                if(ws && isConnected) {
+                    ws.send(JSON.stringify({ type: 'demo' }));
+                    demoIndicator.style.display = 'block';
+                }
+            }
+        });
+
+        // Init
+        connectWS();
+
+    </script>
+</body>
+</html>
