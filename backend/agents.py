@@ -11,7 +11,7 @@ import json
 import os
 import re
 from groq import Groq
-from database import find_item_by_name, check_stock, calculate_margin, get_catalog_names, find_item_by_model, get_model_assignments
+from database import find_item_by_name, check_stock, calculate_margin, get_catalog_names, find_item_by_model, get_model_assignments, get_demand_data, get_all_inventory
 
 # Lazy client init — allows app to start without API key (for demo mode)
 _client = None
@@ -183,35 +183,77 @@ def agent_inventory_check(extracted: dict) -> dict:
 # ─── Agent 3: Deal Strategist ───
 
 def agent_strategist(extracted: dict, inventory_report: dict) -> dict:
-    """Decide: ACCEPT / COUNTER-OFFER / UPSELL / SUSPEND based on inventory report."""
-    system = """You are a luxury fashion deal strategist for Paris Fashion Week B2B negotiations.
-Based on the inventory report, decide one of four actions:
+    """Decide: ACCEPT / COUNTER-OFFER / UPSELL / ALTERNATIVE / SUSPEND based on inventory report + demand."""
+
+    # Get demand data for this item
+    demand_context = ""
+    item_id = inventory_report.get("item_id")
+    if item_id:
+        try:
+            demand = get_demand_data(item_id)
+            demand_context = f"""
+DEMAND DATA:
+- Demand level: {demand['demand_level']}
+- Orders for this item: {demand['order_count']} (total {demand['total_qty_ordered']} units ordered)
+- Current stock: {demand['current_stock']} units"""
+        except Exception:
+            demand_context = "\nDEMAND DATA: Not available."
+
+    # Get full catalog for ALTERNATIVE suggestions
+    catalog_context = ""
+    try:
+        all_items = get_all_inventory()
+        catalog_lines = []
+        for it in all_items:
+            catalog_lines.append(f"  - {it['item_name']} ({it['collection']}, {it['color']}) — stock: {it['stock_qty']}, wholesale: EUR{it['wholesale_price_eur']}")
+        catalog_context = "\nFULL CATALOG (for alternatives):\n" + "\n".join(catalog_lines)
+    except Exception:
+        catalog_context = ""
+
+    system = f"""You are a luxury fashion deal strategist for Paris Fashion Week B2B negotiations.
+Based on the inventory report and demand data, decide one of five actions:
 - ACCEPT: stock sufficient and margin healthy. Approve the deal as-is.
 - COUNTER: stock insufficient OR margin too low. Suggest adjusted quantity and/or price.
 - UPSELL: stock is very high (>2x requested) and margin healthy. Suggest the buyer takes more.
+- ALTERNATIVE: stock is INSUFFICIENT for the requested item. Suggest a SIMILAR item from the catalog that has enough stock. Include a small discount (5-15%) as a goodwill gesture. Pick the most similar item by style/category/price range.
 - SUSPEND: use when the situation is uncertain — for example:
-  * Price is below target but not unacceptable (could work if no better offers come)
-  * Stock is limited and you're unsure if restocking will happen before Fashion Week ends
-  * The deal is borderline — worth holding rather than rejecting or accepting immediately
-  SUSPEND means "hold this deal for later decision, don't deduct stock, don't confirm yet."
+  * Price is below target but not unacceptable
+  * Stock is limited and you're unsure
+  * The deal is borderline
+
+DEMAND-BASED PRICING RULES:
+- If demand is HIGH: be LESS generous with discounts, hold firm on price, counter-offer with higher prices. The item is in demand — buyers will pay more.
+- If demand is MEDIUM: standard negotiation — normal flexibility.
+- If demand is LOW: be MORE generous, offer better prices, upsell more aggressively to move stock.
+
+WHEN TO USE ALTERNATIVE:
+- ONLY when stock_sufficient is false AND the requested quantity cannot be reasonably reduced
+- Pick the most similar item: same collection > same color > similar price range > similar style
+- Offer a 5-15% discount on the alternative item as compensation
+- If the buyer only needs slightly fewer units and stock can cover it, prefer COUNTER over ALTERNATIVE
 
 Return ONLY valid JSON with these keys:
-- action: "ACCEPT" or "COUNTER" or "UPSELL" or "SUSPEND"
+- action: "ACCEPT" or "COUNTER" or "UPSELL" or "ALTERNATIVE" or "SUSPEND"
 - reasoning: 2-3 sentence explanation
 - suggested_quantity: the recommended quantity (same as original if ACCEPT)
 - suggested_price: the recommended price per unit (same as original if ACCEPT)
 - original_quantity: the originally requested quantity
 - original_price: the originally requested price
-- voice_summary: a concise 1-2 sentence summary to be spoken aloud to the sales rep through their earpiece. Natural, conversational tone. No jargon."""
+- alternative_item: (ONLY for ALTERNATIVE action) the name of the suggested alternative item from the catalog
+- alternative_price: (ONLY for ALTERNATIVE action) the discounted price for the alternative
+- discount_pct: (ONLY for ALTERNATIVE action) the discount percentage offered
+- voice_summary: a concise 1-2 sentence summary to be spoken aloud to the sales rep. Natural, conversational tone. If ALTERNATIVE, mention the alternative item name and discount."""
 
     context = f"""DEAL REQUEST:
 Buyer: {extracted.get('buyer', 'Unknown')} from {extracted.get('store', 'Unknown')}
 Item: {extracted.get('item', 'Unknown')}
 Quantity: {extracted.get('quantity', 0)} units
-Price: €{extracted.get('price', 0)} per unit
+Price: EUR{extracted.get('price', 0)} per unit
 
 INVENTORY REPORT:
-{json.dumps(inventory_report, indent=2)}"""
+{json.dumps(inventory_report, indent=2)}
+{demand_context}
+{catalog_context}"""
 
     raw = _call_llm(system, context, json_mode=True)
     try:
@@ -295,6 +337,7 @@ def classify_intent(transcript: str, has_active_deal: bool = False) -> dict:
     - 'stock_add': User is reporting stock received
     - 'model_query': User is asking about what a model wore
     - 'model_assign': User is telling us a model wore something
+    - 'catalog_query': User wants to browse a designer/model's catalog
     - 'deal': Regular deal transcript (default)
     """
     text = transcript.strip().lower()
@@ -317,7 +360,21 @@ def classify_intent(transcript: str, has_active_deal: bool = False) -> dict:
                         # but don't trigger it without context
                         break
 
-    # 3. Stock addition detection
+    # 3. Catalog query detection — "show me X's catalog", "display X collection", "what does X have"
+    catalog_patterns = [
+        r"(?:show me|display|list|what does|what do|browse|see)\s+(?:the\s+)?(?:catalog|collection|catalogue|items?|pieces?)\s+(?:of|from|by|for)\s+(\w+(?:\s+\w+)?)",
+        r"(?:show me|display|list|browse|see)\s+(\w+(?:\s+\w+)?)\s*(?:'s|s)?\s+(?:catalog|collection|catalogue|items?|pieces?)",
+        r"(?:what does|what do)\s+(\w+(?:\s+\w+)?)\s+have",
+        r"(?:show me|display|catalog|collection)\s+(?:for|of|by)\s+(\w+(?:\s+\w+)?)",
+        r"(\w+(?:\s+\w+)?)\s*(?:'s|s)?\s+(?:catalog|collection|catalogue)",
+    ]
+    for pattern in catalog_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            designer_name = match.group(1).strip()
+            return {"intent": "catalog_query", "designer_name": designer_name, "transcript": transcript}
+
+    # 4. Stock addition detection
     for pattern in STOCK_ADD_PATTERNS:
         match = re.search(pattern, text)
         if match:
@@ -325,7 +382,7 @@ def classify_intent(transcript: str, has_active_deal: bool = False) -> dict:
             # Extract item name from the rest of the sentence
             return {"intent": "stock_add", "quantity": qty, "transcript": transcript}
 
-    # 4. Model reference detection (query: "I want what Jade Li wore")
+    # 5. Model reference detection (query: "I want what Jade Li wore")
     for pattern in MODEL_REFERENCE_PATTERNS:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -336,7 +393,7 @@ def classify_intent(transcript: str, has_active_deal: bool = False) -> dict:
             elif any(kw in text for kw in ["wore", "was wearing", "modeled", "walked in", "had on"]):
                 return {"intent": "model_assign", "model_name": model_name, "transcript": transcript}
 
-    # 5. Default — it's a deal transcript
+    # 6. Default — it's a deal transcript
     return {"intent": "deal", "transcript": transcript}
 
 
@@ -475,7 +532,7 @@ async def run_pipeline(transcript: str, send_log):
     # Agent 3 — Strategy
     strategy = agent_strategist(extracted, inventory_report)
     action = strategy.get("action", "COUNTER")
-    emoji = {"ACCEPT": "✅", "COUNTER": "⚡", "UPSELL": "📈", "SUSPEND": "⏸️"}.get(action, "⚡")
+    emoji = {"ACCEPT": "✅", "COUNTER": "⚡", "UPSELL": "📈", "SUSPEND": "⏸️", "ALTERNATIVE": "🔄"}.get(action, "⚡")
     sq = strategy.get("suggested_quantity", extracted.get("quantity", "?"))
     sp = strategy.get("suggested_price", extracted.get("price", "?"))
     total = sq * sp if isinstance(sq, (int, float)) and isinstance(sp, (int, float)) else "?"

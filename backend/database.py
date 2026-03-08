@@ -196,6 +196,40 @@ def find_item_by_name(name: str):
     return None
 
 
+def get_demand_data(item_id: int) -> dict:
+    """Get demand signals for an item: order count, total quantity ordered, and low-stock flag."""
+    conn = get_connection()
+    # Count confirmed + suspended orders (pending = not yet decided, skip)
+    row = conn.execute("""
+        SELECT COUNT(*) as order_count, COALESCE(SUM(quantity), 0) as total_qty_ordered
+        FROM orders
+        WHERE item_id = ? AND status IN ('confirmed', 'suspended')
+    """, (item_id,)).fetchone()
+    # Check current stock for scarcity signal
+    stock_row = conn.execute("SELECT stock_qty FROM inventory WHERE id = ?", (item_id,)).fetchone()
+    conn.close()
+
+    order_count = row["order_count"] if row else 0
+    total_qty = row["total_qty_ordered"] if row else 0
+    current_stock = stock_row["stock_qty"] if stock_row else 0
+
+    # Demand level heuristic: high if 2+ orders OR stock < 30 units
+    if order_count >= 2 or current_stock < 30:
+        level = "HIGH"
+    elif order_count >= 1 or current_stock < 60:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+
+    return {
+        "item_id": item_id,
+        "order_count": order_count,
+        "total_qty_ordered": total_qty,
+        "current_stock": current_stock,
+        "demand_level": level,
+    }
+
+
 def check_stock(item_id: int, quantity: int):
     """Check if enough stock exists. Returns (available, current_stock)."""
     conn = get_connection()

@@ -23,7 +23,7 @@ from database import (
     init_db, get_all_inventory, get_confirmed_orders, get_suspended_orders,
     create_order, confirm_order, suspend_order, reset_inventory, add_stock,
     deduct_stock_external, assign_model, find_item_by_model, get_model_assignments,
-    find_item_by_name,
+    find_item_by_name, get_demand_data,
 )
 from agents import (
     agent_extract, agent_inventory_check, agent_strategist, agent_copywriter,
@@ -48,6 +48,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Multi-Session State ───
+connected_clients: dict = {}  # websocket -> {"rep_name": str, "session": dict}
+
+
+async def broadcast_to_all(data: dict, exclude=None):
+    """Send a JSON message to ALL connected clients, optionally excluding one."""
+    for ws_client, info in list(connected_clients.items()):
+        if ws_client == exclude:
+            continue
+        try:
+            await ws_client.send_text(json.dumps(data))
+        except Exception:
+            pass
+
+
+async def broadcast_inventory():
+    """Push current inventory + orders + suspended to ALL connected clients."""
+    items = get_all_inventory()
+    orders = get_confirmed_orders()
+    suspended = get_suspended_orders()
+    total = sum(o["agreed_price_eur"] * o["quantity"] for o in orders)
+    await broadcast_to_all({"type": "inventory", "items": items})
+    await broadcast_to_all({"type": "orders", "orders": orders, "total_revenue": total})
+    await broadcast_to_all({"type": "suspended", "orders": suspended})
+
 
 # Serve frontend
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -91,6 +117,12 @@ async def websocket_endpoint(websocket: WebSocket):
         "deepgram": None,
         "demo_mode": False,
     }
+
+    # Register this client for multi-session broadcasting
+    rep_name = "Rep"
+    connected_clients[websocket] = {"rep_name": rep_name, "session": session}
+    # Notify others that a new rep connected
+    await broadcast_to_all({"type": "rep_connected", "rep_name": rep_name, "total_reps": len(connected_clients)}, exclude=websocket)
 
     async def send_json(data: dict):
         """Safe JSON send."""
@@ -143,7 +175,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if is_final and transcript.strip():
                             has_active = bool(session.get("extracted"))
                             intent = classify_intent(transcript, has_active_deal=has_active)
-                            await handle_intent(intent, session, send_json, send_inventory_update)
+                            await handle_intent(intent, session, send_json, broadcast_inventory, websocket)
 
                     try:
                         streamer = DeepgramStreamer(on_transcript)
@@ -162,15 +194,45 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # ─── Demo Mode ───
                 elif msg_type == "demo":
-                    await handle_demo(session, send_json, send_inventory_update)
+                    await handle_demo(session, send_json, broadcast_inventory)
 
                 # ─── Confirm Order ───
                 elif msg_type == "confirm":
-                    await handle_confirm(session, send_json, send_inventory_update)
+                    # Capture deal info before confirm (session gets reset inside)
+                    deal_item = session.get("extracted", {}).get("item", "item") if session.get("extracted") else "item"
+                    deal_qty = session.get("strategy", {}).get("suggested_quantity", 0) if session.get("strategy") else 0
+                    deal_buyer = session.get("extracted", {}).get("buyer", "buyer") if session.get("extracted") else "buyer"
+
+                    await handle_confirm(session, send_json, broadcast_inventory)
+
+                    # Cross-session notification
+                    rep_name = connected_clients.get(websocket, {}).get("rep_name", "Rep")
+                    await broadcast_to_all({
+                        "type": "colleague_deal",
+                        "action": "confirmed",
+                        "rep_name": rep_name,
+                        "item": deal_item,
+                        "quantity": deal_qty,
+                        "buyer": deal_buyer,
+                    }, exclude=websocket)
 
                 # ─── Suspend Order ───
                 elif msg_type == "suspend":
-                    await handle_suspend(session, send_json, send_inventory_update)
+                    # Capture deal info before suspend (session gets reset inside)
+                    deal_item = session.get("extracted", {}).get("item", "item") if session.get("extracted") else "item"
+                    deal_buyer = session.get("extracted", {}).get("buyer", "buyer") if session.get("extracted") else "buyer"
+
+                    await handle_suspend(session, send_json, broadcast_inventory)
+
+                    # Cross-session notification
+                    rep_name = connected_clients.get(websocket, {}).get("rep_name", "Rep")
+                    await broadcast_to_all({
+                        "type": "colleague_deal",
+                        "action": "suspended",
+                        "rep_name": rep_name,
+                        "item": deal_item,
+                        "buyer": deal_buyer,
+                    }, exclude=websocket)
 
                 # ─── Inject Transcript (test mode, bypass Deepgram) ───
                 elif msg_type == "inject_transcript":
@@ -179,20 +241,39 @@ async def websocket_endpoint(websocket: WebSocket):
                         await send_json({"type": "transcript", "text": transcript, "is_final": True})
                         has_active = bool(session.get("extracted"))
                         intent = classify_intent(transcript, has_active_deal=has_active)
-                        await handle_intent(intent, session, send_json, send_inventory_update)
+                        await handle_intent(intent, session, send_json, broadcast_inventory, websocket)
+
+                # ─── Update Buyer Info (editable fields) ───
+                elif msg_type == "update_buyer_info":
+                    if session.get("extracted"):
+                        if data.get("email"):
+                            session["extracted"]["email"] = data["email"]
+                        if data.get("phone"):
+                            session["extracted"]["phone"] = data["phone"]
+                        if data.get("address"):
+                            session["extracted"]["address"] = data["address"]
 
                 # ─── Get Inventory ───
                 elif msg_type == "get_inventory":
                     await send_inventory_update()
 
+                # ─── Set Rep Name (multi-session) ───
+                elif msg_type == "set_rep_name":
+                    new_name = data.get("name", "").strip()
+                    if new_name:
+                        old_name = connected_clients.get(websocket, {}).get("rep_name", "Rep")
+                        if websocket in connected_clients:
+                            connected_clients[websocket]["rep_name"] = new_name
+                        await broadcast_to_all({"type": "rep_connected", "rep_name": new_name, "total_reps": len(connected_clients)}, exclude=websocket)
+
                 # ─── Reset Inventory ───
                 elif msg_type == "reset":
                     reset_inventory()
-                    await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                    await broadcast_to_all({"type": "agent_log", "agent": 0, "label": "AURA",
                         "content": "Inventory reset to original stock levels. All orders cleared.", "data": {}})
-                    await send_json({"type": "inventory_reset"})
-                    await send_inventory_update()
-                    # Reset session too
+                    await broadcast_to_all({"type": "inventory_reset"})
+                    await broadcast_inventory()
+                    # Reset local session
                     session["extracted"] = None
                     session["inventory_report"] = None
                     session["strategy"] = None
@@ -211,7 +292,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             "data": {"colleague": colleague, "item": result["item_name"], "deducted": qty, "remaining": result["stock_qty"]}})
                         await send_json({"type": "stock_alert", "colleague": colleague,
                             "item_name": result["item_name"], "quantity_deducted": qty, "remaining_stock": result["stock_qty"]})
-                        await send_inventory_update()
+                        await broadcast_inventory()
+                        # Cross-session notification
+                        await broadcast_to_all({
+                            "type": "colleague_deal",
+                            "action": "deducted",
+                            "rep_name": connected_clients.get(websocket, {}).get("rep_name", "Rep"),
+                            "item": result["item_name"],
+                            "quantity": qty,
+                            "buyer": colleague,
+                        }, exclude=websocket)
                         # TTS alert
                         try:
                             audio_bytes = await synthesize_speech(f"Heads up: {colleague} just sold {qty} units of {result['item_name']}. Only {result['stock_qty']} left.")
@@ -246,7 +336,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             "data": {"colleague": colleague, "item": item["item_name"], "quantity": qty, "buyer": buyer}})
                         await send_json({"type": "competing_order", "colleague": colleague,
                             "item_name": item["item_name"], "quantity": qty, "buyer": buyer})
-                        await send_inventory_update()
+                        await broadcast_inventory()
+                        # Cross-session notification
+                        await broadcast_to_all({
+                            "type": "colleague_deal",
+                            "action": "competing_order",
+                            "rep_name": connected_clients.get(websocket, {}).get("rep_name", "Rep"),
+                            "item": item["item_name"],
+                            "quantity": qty,
+                            "buyer": buyer,
+                        }, exclude=websocket)
                         # TTS alert
                         try:
                             audio_bytes = await synthesize_speech(f"Alert: {colleague} also has a pending order for {qty} units of {item['item_name']}. You might want to close this deal quickly.")
@@ -262,22 +361,58 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if session["deepgram"]:
             await session["deepgram"].stop()
+        # Deregister client and notify others
+        rep_info = connected_clients.pop(websocket, {})
+        rep_name = rep_info.get("rep_name", "Rep")
+        await broadcast_to_all({"type": "rep_disconnected", "rep_name": rep_name, "total_reps": len(connected_clients)})
 
 
 # ─── Intent Router ───
 
-async def handle_intent(intent: dict, session: dict, send_json, send_inventory_update):
+async def handle_intent(intent: dict, session: dict, send_json, send_inventory_update, ws_client=None):
     """Route classified intent to appropriate handler."""
     intent_type = intent.get("intent", "deal")
     transcript = intent.get("transcript", "")
 
     if intent_type == "confirm" and session.get("extracted"):
+        # Capture deal info before confirm (session gets reset inside)
+        deal_item = session.get("extracted", {}).get("item", "item") if session.get("extracted") else "item"
+        deal_qty = session.get("strategy", {}).get("suggested_quantity", 0) if session.get("strategy") else 0
+        deal_buyer = session.get("extracted", {}).get("buyer", "buyer") if session.get("extracted") else "buyer"
+
         await send_json({"type": "voice_command", "action": "confirm"})
         await handle_confirm(session, send_json, send_inventory_update)
 
+        # Cross-session notification (voice-triggered)
+        if ws_client:
+            rep_name = connected_clients.get(ws_client, {}).get("rep_name", "Rep")
+            await broadcast_to_all({
+                "type": "colleague_deal",
+                "action": "confirmed",
+                "rep_name": rep_name,
+                "item": deal_item,
+                "quantity": deal_qty,
+                "buyer": deal_buyer,
+            }, exclude=ws_client)
+
     elif intent_type == "suspend" and session.get("extracted"):
+        # Capture deal info before suspend
+        deal_item = session.get("extracted", {}).get("item", "item") if session.get("extracted") else "item"
+        deal_buyer = session.get("extracted", {}).get("buyer", "buyer") if session.get("extracted") else "buyer"
+
         await send_json({"type": "voice_command", "action": "suspend"})
         await handle_suspend(session, send_json, send_inventory_update)
+
+        # Cross-session notification (voice-triggered)
+        if ws_client:
+            rep_name = connected_clients.get(ws_client, {}).get("rep_name", "Rep")
+            await broadcast_to_all({
+                "type": "colleague_deal",
+                "action": "suspended",
+                "rep_name": rep_name,
+                "item": deal_item,
+                "buyer": deal_buyer,
+            }, exclude=ws_client)
 
     elif intent_type == "confirm" or intent_type == "suspend":
         # Voice command but no active deal
@@ -295,6 +430,9 @@ async def handle_intent(intent: dict, session: dict, send_json, send_inventory_u
 
     elif intent_type == "model_assign":
         await handle_model_assign(intent, session, send_json, send_inventory_update)
+
+    elif intent_type == "catalog_query":
+        await handle_catalog_query(intent, session, send_json, send_inventory_update)
 
     else:
         # Default: regular deal transcript
@@ -429,6 +567,70 @@ async def handle_model_assign(intent: dict, session: dict, send_json, send_inven
         await send_json({"type": "error", "message": f"Model assignment error: {str(e)}"})
 
 
+# ─── Catalog Query Handler ───
+
+async def handle_catalog_query(intent: dict, session: dict, send_json, send_inventory_update):
+    """Handle 'show me Jade Li's catalog' — display items assigned to a designer/model."""
+    designer_name = intent.get("designer_name", "")
+    transcript = intent.get("transcript", "")
+
+    await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+        "content": f"Catalog query: looking up items for '{designer_name}'...", "data": {}})
+
+    # Find items by model/designer name
+    items = find_item_by_model(designer_name)
+    if items:
+        # Build catalog display data
+        catalog_items = []
+        for item in items:
+            demand = get_demand_data(item["id"])
+            catalog_items.append({
+                "item_name": item["item_name"],
+                "collection": item["collection"],
+                "color": item["color"],
+                "stock_qty": item["stock_qty"],
+                "wholesale_price_eur": item["wholesale_price_eur"],
+                "model_name": item["model_name"],
+                "event": item["event"],
+                "demand_level": demand["demand_level"],
+            })
+
+        designer_display = items[0]["model_name"]  # Use the DB-stored name (proper casing)
+
+        await send_json({"type": "agent_log", "agent": 0, "label": "CATALOG",
+            "content": f"Found {len(catalog_items)} item(s) for {designer_display}",
+            "data": {"designer": designer_display, "items": catalog_items}})
+
+        await send_json({
+            "type": "catalog_display",
+            "designer": designer_display,
+            "items": catalog_items,
+        })
+
+        # TTS readout
+        try:
+            if len(catalog_items) == 1:
+                it = catalog_items[0]
+                tts_text = f"{designer_display} wore the {it['item_name']} from the {it['collection']} collection at the {it['event']}. We have {it['stock_qty']} units in stock."
+            else:
+                names = ", ".join(it["item_name"] for it in catalog_items)
+                tts_text = f"{designer_display} has {len(catalog_items)} items: {names}."
+            audio_bytes = await synthesize_speech(tts_text)
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            await send_json({"type": "tts_audio", "audio": audio_b64})
+        except Exception:
+            pass
+    else:
+        await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+            "content": f"No catalog items found for '{designer_name}'. They may not have any assigned pieces.", "data": {}})
+        try:
+            audio_bytes = await synthesize_speech(f"Sorry, I couldn't find any items in the catalog for {designer_name}.")
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            await send_json({"type": "tts_audio", "audio": audio_b64})
+        except Exception:
+            pass
+
+
 # ─── Pipeline Handler (Live Mode) ───
 
 async def handle_pipeline(transcript: str, session: dict, send_json, send_inventory_update):
@@ -456,10 +658,28 @@ async def handle_pipeline(transcript: str, session: dict, send_json, send_invent
 
         # Create pending order if item was found
         if inventory_report.get("item_found"):
+            # ALTERNATIVE: resolve the alternative item to get correct item_id
+            action = strategy.get("action", "")
+            if action == "ALTERNATIVE" and strategy.get("alternative_item"):
+                alt_item = find_item_by_name(strategy["alternative_item"])
+                if alt_item:
+                    order_item_id = alt_item["id"]
+                    # Update inventory report context for frontend display
+                    inventory_report["alternative_item_id"] = alt_item["id"]
+                    inventory_report["alternative_item_name"] = alt_item["item_name"]
+                    inventory_report["alternative_collection"] = alt_item["collection"]
+                    inventory_report["alternative_stock"] = alt_item["stock_qty"]
+                    session["inventory_report"] = inventory_report
+                else:
+                    # Fallback to original item if alt not found
+                    order_item_id = inventory_report["item_id"]
+            else:
+                order_item_id = inventory_report["item_id"]
+
             order_id = create_order(
                 buyer_name=extracted.get("buyer", "Unknown"),
                 store_name=extracted.get("store", "Unknown"),
-                item_id=inventory_report["item_id"],
+                item_id=order_item_id,
                 quantity=strategy.get("suggested_quantity", extracted.get("quantity", 0)),
                 agreed_price=strategy.get("suggested_price", extracted.get("price", 0)),
             )
@@ -618,6 +838,9 @@ async def handle_confirm(session: dict, send_json, send_inventory_update):
         session["order_id"] = None
         session["demo_mode"] = False
 
+        # Tell frontend to clear the deal card
+        await send_json({"type": "clear_deal_card"})
+
     except Exception as e:
         await send_json({"type": "error", "message": f"Confirmation error: {str(e)}"})
 
@@ -705,6 +928,9 @@ async def handle_suspend(session: dict, send_json, send_inventory_update):
         session["order_id"] = None
         session["demo_mode"] = False
 
+        # Tell frontend to clear the deal card
+        await send_json({"type": "clear_deal_card"})
+
     except Exception as e:
         await send_json({"type": "error", "message": f"Suspend error: {str(e)}"})
 
@@ -715,3 +941,4 @@ async def handle_suspend(session: dict, send_json, send_inventory_update):
 async def startup():
     init_db()
     print("[AURA] Backend ready - inventory seeded")
+    print("[AURA] For multi-rep: run with --host 0.0.0.0 and connect from other machines on LAN")

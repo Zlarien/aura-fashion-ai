@@ -403,6 +403,12 @@
             background: transparent;
         }
 
+        .rec-badge.alternative {
+            color: #39FF14;
+            border: 1px solid #39FF14;
+            background: rgba(57, 255, 20, 0.08);
+        }
+
         .confirm-btn {
             background: transparent;
             border: 1px solid var(--text-color);
@@ -631,6 +637,109 @@
             opacity: 0.5;
             z-index: 50;
         }
+
+        /* Debug text input bar */
+        .debug-input-bar {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 40px;
+            background: var(--surface-color);
+            border-bottom: 1px solid var(--border-subtle);
+            z-index: 10;
+        }
+        .debug-input-bar.visible { display: flex; }
+        .debug-input-bar label {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: var(--accent-gold);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .debug-input-bar input {
+            flex: 1;
+            background: var(--bg-color);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-color);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            padding: 6px 12px;
+            outline: none;
+        }
+        .debug-input-bar input:focus {
+            border-color: var(--accent-gold);
+        }
+        .debug-input-bar button {
+            background: transparent;
+            border: 1px solid var(--accent-gold);
+            color: var(--accent-gold);
+            font-family: var(--font-ui);
+            font-size: 9px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            padding: 6px 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .debug-input-bar button:hover {
+            background: var(--accent-gold);
+            color: var(--bg-color);
+        }
+
+        /* Editable buyer info inputs in deal card */
+        .buyer-info-input {
+            background: var(--bg-color);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-color);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            padding: 6px 10px;
+            outline: none;
+            width: 100%;
+            transition: border-color 0.3s;
+        }
+        .buyer-info-input:focus {
+            border-color: var(--accent-gold);
+        }
+        .buyer-info-input::placeholder {
+            color: var(--text-secondary);
+            opacity: 0.5;
+        }
+        .rep-identity {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .rep-name-input {
+            background: transparent;
+            border: 1px solid var(--border-subtle);
+            color: var(--accent-gold);
+            font-family: var(--font-ui);
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            padding: 5px 12px;
+            width: 140px;
+            outline: none;
+            text-transform: uppercase;
+            transition: border-color 0.3s;
+        }
+        .rep-name-input:focus {
+            border-color: var(--accent-gold);
+        }
+        .rep-name-input::placeholder {
+            color: var(--text-secondary);
+            opacity: 0.5;
+        }
+        .rep-count {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: var(--accent-neon);
+            border: 1px solid rgba(57,255,20,0.3);
+            padding: 2px 8px;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -639,6 +748,10 @@
         <div class="logo-container">
             <div class="logo">MAISON AURA</div>
             <div class="subtitle"><span class="live-dot"></span> LIVE SHOWROOM</div>
+        </div>
+        <div class="rep-identity">
+            <input type="text" id="repNameInput" class="rep-name-input" placeholder="Your name..." maxlength="20" autocomplete="off">
+            <span class="rep-count" id="repCount" title="Connected reps">1</span>
         </div>
         <div class="controls">
             <div class="demo-indicator" id="demoIndicator">DEMO MODE ACTIVE</div>
@@ -650,6 +763,12 @@
             </button>
             <div class="status-dot" id="wsStatus" title="Disconnected"></div>
         </div>
+    </div>
+
+    <div class="debug-input-bar" id="debugInputBar">
+        <label>DEBUG</label>
+        <input type="text" id="debugInput" placeholder="Type transcript here..." autocomplete="off">
+        <button id="debugSendBtn">SEND</button>
     </div>
 
     <div class="main-container">
@@ -687,6 +806,22 @@
                         <div class="data-item" id="di-qty">
                             <span class="data-label">Quantity / Price</span>
                             <span class="data-value" id="val-qty-price">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Editable buyer info fields -->
+                    <div class="data-grid buyer-info-grid" id="buyerInfoGrid" style="display:none;">
+                        <div class="data-item visible">
+                            <span class="data-label">Email</span>
+                            <input type="email" class="buyer-info-input" id="buyerEmail" placeholder="buyer@store.com">
+                        </div>
+                        <div class="data-item visible">
+                            <span class="data-label">Phone (optional)</span>
+                            <input type="tel" class="buyer-info-input" id="buyerPhone" placeholder="+33 ...">
+                        </div>
+                        <div class="data-item visible" style="grid-column: span 2;">
+                            <span class="data-label">Shipping Address (optional)</span>
+                            <input type="text" class="buyer-info-input" id="buyerAddress" placeholder="Delivery address...">
                         </div>
                     </div>
                     
@@ -735,7 +870,7 @@
     </div>
 
     <div class="shortcut-hint">
-        SHIFT+D Demo &nbsp;|&nbsp; SHIFT+R Reset &nbsp;|&nbsp; SHIFT+C Colleague &nbsp;|&nbsp; SHIFT+P Pending
+        SHIFT+D Demo &nbsp;|&nbsp; SHIFT+T Text &nbsp;|&nbsp; SHIFT+R Reset &nbsp;|&nbsp; SHIFT+C Colleague &nbsp;|&nbsp; SHIFT+P Pending &nbsp;|&nbsp; Multi-rep: connect from LAN
     </div>
 
     <div class="toast" id="toast">Error message</div>
@@ -774,6 +909,28 @@
         // Expose for testing via console/Playwright
         Object.defineProperty(window, 'auraWS', { get: () => ws });
 
+        // Rep name — send to backend on change
+        const repNameInput = document.getElementById('repNameInput');
+        let repName = '';
+
+        repNameInput.addEventListener('blur', () => {
+            const name = repNameInput.value.trim();
+            if (name && name !== repName && ws && isConnected) {
+                repName = name;
+                ws.send(JSON.stringify({ type: 'set_rep_name', name: repName }));
+            }
+        });
+        repNameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                repNameInput.blur();
+            }
+            // Prevent Shift+key shortcuts when typing
+            if (e.shiftKey) e.stopPropagation();
+        });
+
+        // LAN multi-rep: serve via uvicorn (http://LAN_IP:8000/) — WS auto-connects
+        // Don't open via file:// on remote machine — use the server URL instead
         // Auto-detect WebSocket URL: wss:// for deployed, ws:// for localhost
         const WS_URL = (() => {
             // file:// protocol or localhost → always connect to local backend
@@ -798,6 +955,10 @@
                 wsStatus.classList.add('connected');
                 wsStatus.title = "Connected";
                 ws.send(JSON.stringify({ type: 'get_inventory' }));
+                // Send rep name if already entered
+                if (repName) {
+                    ws.send(JSON.stringify({ type: 'set_rep_name', name: repName }));
+                }
             };
 
             ws.onclose = () => {
@@ -825,8 +986,44 @@
         }
 
         // Message Handler
+        function handleColleagueDeal(msg) {
+            const action = msg.action || 'updated';
+            const rep = msg.rep_name || 'Colleague';
+            const item = msg.item || 'item';
+            const qty = msg.quantity || '';
+            const buyer = msg.buyer || '';
+            
+            let text = '';
+            if (action === 'confirmed') {
+                text = `${rep} confirmed ${qty ? qty + 'x ' : ''}${item}${buyer ? ' for ' + buyer : ''}`;
+            } else if (action === 'suspended') {
+                text = `${rep} suspended deal on ${item}${buyer ? ' for ' + buyer : ''}`;
+            } else if (action === 'deducted') {
+                text = `${rep}: ${qty ? qty + ' units of ' : ''}${item} deducted`;
+            } else {
+                text = `${rep}: ${action} on ${item}`;
+            }
+            
+            showToast(text, 'gold');
+            // Flash the inventory item if applicable
+            if (item && item !== 'item' && typeof flashInventoryItem === 'function') {
+                flashInventoryItem(item);
+            }
+        }
+
         function handleMessage(msg) {
             switch(msg.type) {
+                case 'colleague_deal':
+                    handleColleagueDeal(msg);
+                    break;
+                case 'rep_connected':
+                    document.getElementById('repCount').textContent = msg.total_reps || '?';
+                    showToast(`${msg.rep_name} joined the showroom`, 'gold');
+                    break;
+                case 'rep_disconnected':
+                    document.getElementById('repCount').textContent = msg.total_reps || '?';
+                    showToast(`${msg.rep_name} left the showroom`, 'default');
+                    break;
                 case 'agent_log':
                     appendLog(msg.agent, msg.label, msg.content, msg.data);
                     break;
@@ -896,6 +1093,45 @@
                     break;
                 case 'email_captured':
                     showToast(`Email captured: ${msg.email}`, 'gold');
+                    document.getElementById('buyerEmail').value = msg.email;
+                    break;
+                case 'catalog_display':
+                    showCatalogDisplay(msg.designer, msg.items);
+                    break;
+                case 'clear_deal_card':
+                    // Reset all data-item values
+                    document.querySelectorAll('#orderContent .data-item').forEach(di => {
+                        di.classList.remove('visible');
+                        const val = di.querySelector('.data-value');
+                        if(val) val.textContent = '--';
+                    });
+                    // Hide badge, email, receipt, buttons
+                    badgeContainer.classList.remove('visible');
+                    emailPreview.classList.remove('visible');
+                    receiptPreview.classList.remove('visible');
+                    confirmBtn.classList.remove('visible');
+                    suspendBtn.classList.remove('visible');
+                    // Reset button states
+                    confirmBtn.textContent = 'CONFIRM ORDER';
+                    confirmBtn.style.pointerEvents = '';
+                    confirmBtn.style.background = 'transparent';
+                    confirmBtn.style.color = 'var(--text-color)';
+                    confirmBtn.style.animation = '';
+                    suspendBtn.textContent = 'SUSPEND';
+                    suspendBtn.style.pointerEvents = '';
+                    suspendBtn.style.background = 'transparent';
+                    suspendBtn.style.color = '#FFA500';
+                    // Clear buyer info inputs and hide grid
+                    document.getElementById('buyerEmail').value = '';
+                    document.getElementById('buyerPhone').value = '';
+                    document.getElementById('buyerAddress').value = '';
+                    document.getElementById('buyerInfoGrid').style.display = 'none';
+                    // Reset stock bar
+                    stockBar.style.width = '0%';
+                    // Reset current recommendation
+                    currentRec = null;
+                    // Hide demo indicator
+                    demoIndicator.style.display = 'none';
                     break;
             }
         }
@@ -1068,6 +1304,12 @@
                 document.getElementById('val-qty-price').textContent = `${qty} units @ €${Number(price).toLocaleString()}`;
                 document.getElementById('di-qty').classList.add('visible');
             }
+
+            // Show buyer info fields and pre-fill email if captured
+            document.getElementById('buyerInfoGrid').style.display = '';
+            if (ext.email) {
+                document.getElementById('buyerEmail').value = ext.email;
+            }
         }
 
         function showRecommendation(action) {
@@ -1085,7 +1327,7 @@
 
             badgeContainer.classList.add('visible');
             recBadge.className = `rec-badge ${action.toLowerCase()}`;
-            const labels = { ACCEPT: 'ACCEPT', COUNTER: 'COUNTER-OFFER', UPSELL: 'UPSELL', SUSPEND: 'SUSPEND' };
+            const labels = { ACCEPT: 'ACCEPT', COUNTER: 'COUNTER-OFFER', UPSELL: 'UPSELL', SUSPEND: 'SUSPEND', ALTERNATIVE: 'ALTERNATIVE' };
             recBadge.textContent = labels[action] || action;
 
             if (action === 'SUSPEND') {
@@ -1094,6 +1336,22 @@
             } else {
                 confirmBtn.classList.add('visible');
                 suspendBtn.classList.add('visible');
+            }
+
+            // Show alternative item info if ALTERNATIVE action
+            if (action === 'ALTERNATIVE' && currentRec?.data) {
+                const altItem = currentRec.data.alternative_item || '';
+                const altPrice = currentRec.data.alternative_price || '';
+                const discount = currentRec.data.discount_pct || '';
+                if (altItem) {
+                    document.getElementById('val-item').textContent = altItem + ' (ALTERNATIVE)';
+                    document.getElementById('di-item').classList.add('visible');
+                }
+                if (altPrice) {
+                    const qty = currentRec.data.suggested_quantity || currentRec.extracted?.quantity || 0;
+                    document.getElementById('val-qty-price').textContent = `${qty} units @ €${Number(altPrice).toLocaleString()} (${discount}% off)`;
+                    document.getElementById('di-qty').classList.add('visible');
+                }
             }
         }
 
@@ -1147,6 +1405,55 @@
                 confirmBtn.classList.remove('visible');
                 demoIndicator.style.display = 'none';
             }
+        }
+
+        function showCatalogDisplay(designer, items) {
+            // Show catalog items in the deal card area (repurpose order content)
+            const orderContent = document.getElementById('orderContent');
+            
+            // Hide deal-specific elements
+            badgeContainer.classList.remove('visible');
+            confirmBtn.classList.remove('visible');
+            suspendBtn.classList.remove('visible');
+            emailPreview.classList.remove('visible');
+            receiptPreview.classList.remove('visible');
+            document.getElementById('buyerInfoGrid').style.display = 'none';
+
+            // Build catalog HTML in the data grid area
+            document.getElementById('di-buyer').classList.add('visible');
+            document.getElementById('val-buyer').textContent = designer;
+            document.getElementById('di-store').classList.add('visible');
+            document.getElementById('val-store').textContent = `${items.length} item(s) in catalog`;
+            
+            // Show items in item/qty fields
+            if (items.length > 0) {
+                const itemNames = items.map(it => `${it.item_name} (${it.collection})`).join(', ');
+                document.getElementById('val-item').textContent = itemNames;
+                document.getElementById('di-item').classList.add('visible');
+                
+                const details = items.map(it => {
+                    const demandBadge = it.demand_level === 'HIGH' ? ' 🔥' : (it.demand_level === 'MEDIUM' ? ' ⚡' : '');
+                    return `${it.item_name}: ${it.stock_qty} in stock — EUR${it.wholesale_price_eur}${demandBadge}`;
+                }).join(' | ');
+                document.getElementById('val-qty-price').textContent = details;
+                document.getElementById('di-qty').classList.add('visible');
+                
+                // Show stock bar for first item
+                const firstItem = items[0];
+                const maxStock = 250;
+                const pct = Math.round((firstItem.stock_qty / maxStock) * 100);
+                stockBar.style.width = `${Math.min(pct, 100)}%`;
+                stockBar.style.background = pct > 50 ? 'var(--accent-color)' : (pct > 20 ? '#FFA500' : '#ff3333');
+            }
+
+            // Show catalog badge
+            badgeContainer.classList.add('visible');
+            recBadge.className = 'rec-badge accept';
+            recBadge.textContent = 'CATALOG';
+            recBadge.style.background = 'rgba(201,168,76,0.15)';
+            recBadge.style.color = 'var(--accent-color)';
+
+            showToast(`Catalog: ${designer} — ${items.length} item(s)`, 'gold');
         }
 
         function showEmail(content) {
@@ -1343,8 +1650,53 @@
                         colleague: 'Elise (Showroom C)'
                     }));
                 }
+            } else if (key === 't') {
+                // Toggle debug text input
+                e.preventDefault();
+                const bar = document.getElementById('debugInputBar');
+                const input = document.getElementById('debugInput');
+                bar.classList.toggle('visible');
+                if (bar.classList.contains('visible')) {
+                    input.focus();
+                } else {
+                    input.blur();
+                }
             }
         });
+
+        // Debug text input — send on Enter or button click
+        function sendDebugTranscript() {
+            const input = document.getElementById('debugInput');
+            const text = input.value.trim();
+            if (!text) return;
+            if (!ws || !isConnected) { showToast('Not connected to backend', 'alert'); return; }
+            ws.send(JSON.stringify({ type: 'inject_transcript', text: text }));
+            input.value = '';
+            showToast('Debug: transcript injected', 'gold');
+        }
+        document.getElementById('debugSendBtn').addEventListener('click', sendDebugTranscript);
+        document.getElementById('debugInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); sendDebugTranscript(); }
+            // Prevent Shift+T from toggling when typing in the input
+            if (e.shiftKey && e.key.toLowerCase() === 't') { e.stopPropagation(); }
+        });
+
+        // Buyer info fields — send update on blur
+        function sendBuyerInfoUpdate() {
+            if (!ws || !isConnected) return;
+            const email = document.getElementById('buyerEmail').value.trim();
+            const phone = document.getElementById('buyerPhone').value.trim();
+            const address = document.getElementById('buyerAddress').value.trim();
+            ws.send(JSON.stringify({
+                type: 'update_buyer_info',
+                email: email || null,
+                phone: phone || null,
+                address: address || null,
+            }));
+        }
+        document.getElementById('buyerEmail').addEventListener('blur', sendBuyerInfoUpdate);
+        document.getElementById('buyerPhone').addEventListener('blur', sendBuyerInfoUpdate);
+        document.getElementById('buyerAddress').addEventListener('blur', sendBuyerInfoUpdate);
 
         // Init
         connectWS();
