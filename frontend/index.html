@@ -792,11 +792,11 @@
                     <div class="data-grid">
                         <div class="data-item" id="di-buyer">
                             <span class="data-label">Buyer</span>
-                            <span class="data-value" id="val-buyer">--</span>
+                            <input type="text" class="buyer-info-input data-value" id="val-buyer" placeholder="Buyer name..." value="">
                         </div>
                         <div class="data-item" id="di-store">
                             <span class="data-label">Store</span>
-                            <span class="data-value" id="val-store">--</span>
+                            <input type="text" class="buyer-info-input data-value" id="val-store" placeholder="Store name..." value="">
                         </div>
                         <div class="data-item" id="di-item">
                             <span class="data-label">Item Model</span>
@@ -1103,7 +1103,10 @@
                     document.querySelectorAll('#orderContent .data-item').forEach(di => {
                         di.classList.remove('visible');
                         const val = di.querySelector('.data-value');
-                        if(val) val.textContent = '--';
+                        if(val) {
+                            if(val.tagName === 'INPUT') val.value = '';
+                            else val.textContent = '--';
+                        }
                     });
                     // Hide badge, email, receipt, buttons
                     badgeContainer.classList.remove('visible');
@@ -1272,11 +1275,11 @@
             const strategy = msg.data || {};
 
             if(ext.buyer) {
-                document.getElementById('val-buyer').textContent = ext.buyer;
+                document.getElementById('val-buyer').value = ext.buyer;
                 document.getElementById('di-buyer').classList.add('visible');
             }
             if(ext.store) {
-                document.getElementById('val-store').textContent = ext.store;
+                document.getElementById('val-store').value = ext.store;
                 document.getElementById('di-store').classList.add('visible');
             }
             if(ext.item) {
@@ -1421,9 +1424,9 @@
 
             // Build catalog HTML in the data grid area
             document.getElementById('di-buyer').classList.add('visible');
-            document.getElementById('val-buyer').textContent = designer;
+                document.getElementById('val-buyer').value = designer;
             document.getElementById('di-store').classList.add('visible');
-            document.getElementById('val-store').textContent = `${items.length} item(s) in catalog`;
+                document.getElementById('val-store').value = `${items.length} item(s) in catalog`;
             
             // Show items in item/qty fields
             if (items.length > 0) {
@@ -1684,16 +1687,22 @@
         // Buyer info fields — send update on blur
         function sendBuyerInfoUpdate() {
             if (!ws || !isConnected) return;
+            const buyer = document.getElementById('val-buyer').value.trim();
+            const store = document.getElementById('val-store').value.trim();
             const email = document.getElementById('buyerEmail').value.trim();
             const phone = document.getElementById('buyerPhone').value.trim();
             const address = document.getElementById('buyerAddress').value.trim();
             ws.send(JSON.stringify({
                 type: 'update_buyer_info',
+                buyer: buyer || null,
+                store: store || null,
                 email: email || null,
                 phone: phone || null,
                 address: address || null,
             }));
         }
+        document.getElementById('val-buyer').addEventListener('blur', sendBuyerInfoUpdate);
+        document.getElementById('val-store').addEventListener('blur', sendBuyerInfoUpdate);
         document.getElementById('buyerEmail').addEventListener('blur', sendBuyerInfoUpdate);
         document.getElementById('buyerPhone').addEventListener('blur', sendBuyerInfoUpdate);
         document.getElementById('buyerAddress').addEventListener('blur', sendBuyerInfoUpdate);

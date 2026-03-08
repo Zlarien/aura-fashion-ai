@@ -75,6 +75,21 @@ async def broadcast_inventory():
     await broadcast_to_all({"type": "suspended", "orders": suspended})
 
 
+async def _tts_task(send_fn, text: str):
+    """Background TTS: synthesize + send audio without blocking caller."""
+    try:
+        audio_bytes = await synthesize_speech(text)
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        await send_fn({"type": "tts_audio", "audio": audio_b64})
+    except Exception as e:
+        print(f"[TTS Background] {e}")
+
+
+def fire_tts(send_fn, text: str):
+    """Fire-and-forget TTS — returns immediately, audio arrives async."""
+    asyncio.create_task(_tts_task(send_fn, text))
+
+
 # Serve frontend
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -246,6 +261,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 # ─── Update Buyer Info (editable fields) ───
                 elif msg_type == "update_buyer_info":
                     if session.get("extracted"):
+                        if data.get("buyer"):
+                            session["extracted"]["buyer"] = data["buyer"]
+                        if data.get("store"):
+                            session["extracted"]["store"] = data["store"]
                         if data.get("email"):
                             session["extracted"]["email"] = data["email"]
                         if data.get("phone"):
@@ -302,13 +321,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "quantity": qty,
                             "buyer": colleague,
                         }, exclude=websocket)
-                        # TTS alert
-                        try:
-                            audio_bytes = await synthesize_speech(f"Heads up: {colleague} just sold {qty} units of {result['item_name']}. Only {result['stock_qty']} left.")
-                            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                            await send_json({"type": "tts_audio", "audio": audio_b64})
-                        except Exception:
-                            pass
+                        # TTS alert (non-blocking)
+                        fire_tts(send_json, f"Heads up: {colleague} just sold {qty} units of {result['item_name']}. Only {result['stock_qty']} left.")
 
                 # ─── Colleague Competing Order Simulation ───
                 elif msg_type == "colleague_order":
@@ -346,13 +360,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "quantity": qty,
                             "buyer": buyer,
                         }, exclude=websocket)
-                        # TTS alert
-                        try:
-                            audio_bytes = await synthesize_speech(f"Alert: {colleague} also has a pending order for {qty} units of {item['item_name']}. You might want to close this deal quickly.")
-                            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                            await send_json({"type": "tts_audio", "audio": audio_b64})
-                        except Exception:
-                            pass
+                        # TTS alert (non-blocking)
+                        fire_tts(send_json, f"Alert: {colleague} also has a pending order for {qty} units of {item['item_name']}. You might want to close this deal quickly.")
 
     except WebSocketDisconnect:
         pass
@@ -449,13 +458,8 @@ async def handle_email_intent(intent: dict, session: dict, send_json):
         await send_json({"type": "agent_log", "agent": 1, "label": "EXTRACTOR",
             "content": f"Email captured by voice: {email}", "data": {"email": email}})
         await send_json({"type": "email_captured", "email": email})
-        # TTS confirmation
-        try:
-            audio_bytes = await synthesize_speech(f"Got it, I've noted the email {email}.")
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await send_json({"type": "tts_audio", "audio": audio_b64})
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+        # TTS confirmation (non-blocking)
+        fire_tts(send_json, f"Got it, I've noted the email {email}.")
     else:
         await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
             "content": f"Email noted: {email} -- will attach to next deal.", "data": {"email": email}})
@@ -488,13 +492,8 @@ async def handle_stock_add(intent: dict, session: dict, send_json, send_inventor
             await send_json({"type": "stock_added", "item_name": result["item_name"],
                 "quantity_added": quantity, "new_stock": result["stock_qty"]})
             await send_inventory_update()
-            # TTS feedback
-            try:
-                audio_bytes = await synthesize_speech(f"Done. Added {quantity} units of {result['item_name']}. New total: {result['stock_qty']}.")
-                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                await send_json({"type": "tts_audio", "audio": audio_b64})
-            except Exception:
-                pass
+            # TTS feedback (non-blocking)
+            fire_tts(send_json, f"Done. Added {quantity} units of {result['item_name']}. New total: {result['stock_qty']}.")
         else:
             await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
                 "content": f"Could not find item '{item_name}' in inventory to add stock.", "data": {}})
@@ -522,12 +521,7 @@ async def handle_model_query(intent: dict, session: dict, send_json, send_invent
     else:
         await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
             "content": f"No items found for model '{model_name}'. Check model name and try again.", "data": {}})
-        try:
-            audio_bytes = await synthesize_speech(f"Sorry, I don't have any items associated with {model_name}.")
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await send_json({"type": "tts_audio", "audio": audio_b64})
-        except Exception:
-            pass
+        fire_tts(send_json, f"Sorry, I don't have any items associated with {model_name}.")
 
 
 # ─── Model Assign Handler ───
@@ -554,12 +548,7 @@ async def handle_model_assign(intent: dict, session: dict, send_json, send_inven
                 "data": result})
             await send_json({"type": "model_assigned", "model_name": result["model_name"],
                 "item_name": result["item_name"], "event": result["event"]})
-            try:
-                audio_bytes = await synthesize_speech(f"Noted. {result['model_name']} wore the {result['item_name']} at the {result['event']}.")
-                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                await send_json({"type": "tts_audio", "audio": audio_b64})
-            except Exception:
-                pass
+            fire_tts(send_json, f"Noted. {result['model_name']} wore the {result['item_name']} at the {result['event']}.")
         else:
             await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
                 "content": f"Could not find item '{item_name}' in catalog for model assignment.", "data": {}})
@@ -607,28 +596,18 @@ async def handle_catalog_query(intent: dict, session: dict, send_json, send_inve
             "items": catalog_items,
         })
 
-        # TTS readout
-        try:
-            if len(catalog_items) == 1:
-                it = catalog_items[0]
-                tts_text = f"{designer_display} wore the {it['item_name']} from the {it['collection']} collection at the {it['event']}. We have {it['stock_qty']} units in stock."
-            else:
-                names = ", ".join(it["item_name"] for it in catalog_items)
-                tts_text = f"{designer_display} has {len(catalog_items)} items: {names}."
-            audio_bytes = await synthesize_speech(tts_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await send_json({"type": "tts_audio", "audio": audio_b64})
-        except Exception:
-            pass
+        # TTS readout (non-blocking)
+        if len(catalog_items) == 1:
+            it = catalog_items[0]
+            tts_text = f"{designer_display} wore the {it['item_name']} from the {it['collection']} collection at the {it['event']}. We have {it['stock_qty']} units in stock."
+        else:
+            names = ", ".join(it["item_name"] for it in catalog_items)
+            tts_text = f"{designer_display} has {len(catalog_items)} items: {names}."
+        fire_tts(send_json, tts_text)
     else:
         await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
             "content": f"No catalog items found for '{designer_name}'. They may not have any assigned pieces.", "data": {}})
-        try:
-            audio_bytes = await synthesize_speech(f"Sorry, I couldn't find any items in the catalog for {designer_name}.")
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await send_json({"type": "tts_audio", "audio": audio_b64})
-        except Exception:
-            pass
+        fire_tts(send_json, f"Sorry, I couldn't find any items in the catalog for {designer_name}.")
 
 
 # ─── Pipeline Handler (Live Mode) ───
@@ -694,18 +673,13 @@ async def handle_pipeline(transcript: str, session: dict, send_json, send_invent
             "inventory": inventory_report,
         })
 
-        # Generate TTS for voice summary
-        try:
-            voice_text = strategy.get("voice_summary", "Processing complete.")
-            # If no email was provided by the buyer, append a gentle ask
-            buyer_email = extracted.get("email")
-            if not buyer_email:
-                voice_text += " By the way, do you have an email for the buyer? It's optional but useful for the confirmation."
-            audio_bytes = await synthesize_speech(voice_text)
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            await send_json({"type": "tts_audio", "audio": audio_b64})
-        except Exception as e:
-            print(f"[TTS Error] {e}")
+        # Generate TTS for voice summary (non-blocking)
+        voice_text = strategy.get("voice_summary", "Processing complete.")
+        # If no email was provided by the buyer, append a gentle ask
+        buyer_email = extracted.get("email")
+        if not buyer_email:
+            voice_text += " By the way, do you have an email for the buyer? It's optional but useful for the confirmation."
+        fire_tts(send_json, voice_text)
 
     except Exception as e:
         await send_json({"type": "error", "message": f"Pipeline error: {str(e)}"})
@@ -760,13 +734,8 @@ async def handle_demo(session: dict, send_json, send_inventory_update):
         "inventory": DEMO_AGENT2_RESULT,
     })
 
-    # TTS
-    try:
-        audio_bytes = await synthesize_speech(DEMO_TTS_TEXT)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        await send_json({"type": "tts_audio", "audio": audio_b64})
-    except Exception as e:
-        print(f"[Demo TTS Error] {e} — skipping TTS in demo")
+    # TTS (non-blocking)
+    fire_tts(send_json, DEMO_TTS_TEXT)
 
 
 # ─── Confirm Handler ───
