@@ -397,6 +397,12 @@
             background: transparent;
         }
 
+        .rec-badge.suspend {
+            color: #FFA500;
+            border: 1px solid #FFA500;
+            background: transparent;
+        }
+
         .confirm-btn {
             background: transparent;
             border: 1px solid var(--text-color);
@@ -408,7 +414,6 @@
             letter-spacing: 0.2em;
             transition: all 0.3s;
             text-transform: uppercase;
-            margin-top: auto;
             display: none;
         }
 
@@ -435,6 +440,34 @@
         }
 
         .email-preview.visible { display: block; opacity: 1; }
+
+        .receipt-preview {
+            background: linear-gradient(135deg, #fefefe 0%, #f8f6f2 100%);
+            color: #1a1a1a;
+            padding: 35px 30px;
+            border-radius: 0;
+            border-left: 3px solid #FFA500;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            line-height: 1.5;
+            display: none;
+            opacity: 0;
+            transition: opacity 0.8s ease;
+            margin-top: 20px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.15);
+            white-space: pre-wrap;
+        }
+        .receipt-preview.visible { display: block; opacity: 1; }
+
+        .order-suspended-badge {
+            color: #FFA500;
+            font-family: var(--font-mono);
+            font-size: 9px;
+            letter-spacing: 0.1em;
+            border: 1px solid rgba(255,165,0,0.3);
+            padding: 2px 6px;
+            text-transform: uppercase;
+        }
 
         .email-header {
             border-bottom: 1px solid #d4c5a9;
@@ -615,7 +648,12 @@
                         <div class="email-body" id="em-body"></div>
                     </div>
 
-                    <button class="confirm-btn" id="confirmBtn">CONFIRM ORDER</button>
+                    <div class="receipt-preview" id="receiptPreview"></div>
+
+                    <div style="display: flex; gap: 12px; margin-top: auto;">
+                        <button class="confirm-btn" id="confirmBtn">CONFIRM ORDER</button>
+                        <button class="confirm-btn" id="suspendBtn" style="border-color: #FFA500; color: #FFA500;">SUSPEND</button>
+                    </div>
                 </div>
             </div>
 
@@ -653,18 +691,23 @@
         const toast = document.getElementById('toast');
         
         const confirmBtn = document.getElementById('confirmBtn');
+        const suspendBtn = document.getElementById('suspendBtn');
         const badgeContainer = document.getElementById('badgeContainer');
         const recBadge = document.getElementById('recBadge');
         const stockBar = document.getElementById('stockBar');
         const emailPreview = document.getElementById('emailPreview');
+        const receiptPreview = document.getElementById('receiptPreview');
 
         // WebSocket Setup
         let ws;
         let isConnected = false;
+        // Expose for testing via console/Playwright
+        Object.defineProperty(window, 'auraWS', { get: () => ws });
 
         // Auto-detect WebSocket URL: wss:// for deployed, ws:// for localhost
         const WS_URL = (() => {
-            if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+            // file:// protocol or localhost → always connect to local backend
+            if (!location.hostname || location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
                 return 'ws://localhost:8000/ws';
             }
             // Deployed: use Railway backend URL (update this after Railway deploy)
@@ -724,6 +767,18 @@
                 case 'confirmation_email':
                     showEmail(msg.content);
                     break;
+                case 'payment_receipt':
+                    showReceipt(msg.content);
+                    break;
+                case 'order_suspended':
+                    showSuspendedNotice(msg);
+                    break;
+                case 'voice_command':
+                    handleVoiceCommand(msg.action);
+                    break;
+                case 'suspended':
+                    renderSuspended(msg.orders);
+                    break;
                 case 'tts_audio':
                     playAudio(msg.audio);
                     break;
@@ -768,18 +823,29 @@
             if(!isConnected) return showError("Not connected to backend");
             try {
                 ws.send(JSON.stringify({ type: 'start_recording' }));
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true } 
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
                 });
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                
-                mediaRecorder.ondataavailable = (e) => {
-                    if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-                        ws.send(e.data);
+
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const source = audioCtx.createMediaStreamSource(stream);
+                const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = (e) => {
+                    if (ws.readyState !== WebSocket.OPEN) return;
+                    const float32 = e.inputBuffer.getChannelData(0);
+                    const int16 = new Int16Array(float32.length);
+                    for (let i = 0; i < float32.length; i++) {
+                        const s = Math.max(-1, Math.min(1, float32[i]));
+                        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
+                    ws.send(int16.buffer);
                 };
 
-                mediaRecorder.start(250);
+                source.connect(processor);
+                processor.connect(audioCtx.destination);
+
+                mediaRecorder = { stream, audioCtx, processor, source };
                 micBtn.classList.add('recording');
                 isRecording = true;
                 transcriptDisplay.textContent = "Listening...";
@@ -790,14 +856,22 @@
         }
 
         function stopRecording() {
-            if(mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(t => t.stop());
+            if (mediaRecorder) {
+                if (mediaRecorder.processor) {
+                    mediaRecorder.processor.disconnect();
+                    mediaRecorder.source.disconnect();
+                    mediaRecorder.audioCtx.close();
+                    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+                } else if (mediaRecorder.state && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+                }
                 micBtn.classList.remove('recording');
                 isRecording = false;
                 if(ws && isConnected) {
                     ws.send(JSON.stringify({ type: 'stop_recording' }));
                 }
+                mediaRecorder = null;
             }
         }
 
@@ -902,11 +976,30 @@
         }
 
         function showRecommendation(action) {
+            // Reset state for new deal
+            receiptPreview.classList.remove('visible');
+            emailPreview.classList.remove('visible');
+            suspendBtn.textContent = 'SUSPEND';
+            suspendBtn.style.pointerEvents = '';
+            suspendBtn.style.background = 'transparent';
+            suspendBtn.style.color = '#FFA500';
+            confirmBtn.textContent = 'CONFIRM ORDER';
+            confirmBtn.style.pointerEvents = '';
+            confirmBtn.style.background = 'transparent';
+            confirmBtn.style.color = 'var(--text-color)';
+
             badgeContainer.classList.add('visible');
             recBadge.className = `rec-badge ${action.toLowerCase()}`;
-            const labels = { ACCEPT: 'ACCEPT', COUNTER: 'COUNTER-OFFER', UPSELL: 'UPSELL' };
+            const labels = { ACCEPT: 'ACCEPT', COUNTER: 'COUNTER-OFFER', UPSELL: 'UPSELL', SUSPEND: 'SUSPEND' };
             recBadge.textContent = labels[action] || action;
-            confirmBtn.classList.add('visible');
+
+            if (action === 'SUSPEND') {
+                confirmBtn.classList.remove('visible');
+                suspendBtn.classList.add('visible');
+            } else {
+                confirmBtn.classList.add('visible');
+                suspendBtn.classList.add('visible');
+            }
         }
 
         confirmBtn.addEventListener('click', () => {
@@ -918,8 +1011,48 @@
                 confirmBtn.style.color = "var(--bg-color)";
                 confirmBtn.style.animation = "none";
                 demoIndicator.style.display = 'none';
+                receiptPreview.classList.remove('visible');
             }
         });
+
+        suspendBtn.addEventListener('click', () => {
+            if(ws && isConnected) {
+                ws.send(JSON.stringify({ type: 'suspend' }));
+                suspendBtn.textContent = "SUSPENDED";
+                suspendBtn.style.pointerEvents = "none";
+                suspendBtn.style.background = "#FFA500";
+                suspendBtn.style.color = "var(--bg-color)";
+                confirmBtn.classList.remove('visible');
+                demoIndicator.style.display = 'none';
+            }
+        });
+
+        function handleVoiceCommand(action) {
+            // Triggered when the backend detects a voice command (user said "confirmed" or "suspend")
+            if (action === 'confirm') {
+                confirmBtn.textContent = "CONFIRMED";
+                confirmBtn.style.pointerEvents = "none";
+                confirmBtn.style.background = "var(--accent-color)";
+                confirmBtn.style.color = "var(--bg-color)";
+                confirmBtn.style.animation = "none";
+                demoIndicator.style.display = 'none';
+                receiptPreview.classList.remove('visible');
+                // Show voice confirmation toast
+                toast.textContent = "Voice confirmed — processing order";
+                toast.style.borderColor = 'var(--accent-color)';
+                toast.style.color = 'var(--accent-color)';
+                toast.style.background = 'rgba(201,168,76,0.08)';
+                toast.classList.add('show');
+                setTimeout(() => { toast.classList.remove('show'); toast.style.borderColor = ''; toast.style.color = ''; toast.style.background = ''; }, 3000);
+            } else if (action === 'suspend') {
+                suspendBtn.textContent = "SUSPENDED";
+                suspendBtn.style.pointerEvents = "none";
+                suspendBtn.style.background = "#FFA500";
+                suspendBtn.style.color = "var(--bg-color)";
+                confirmBtn.classList.remove('visible');
+                demoIndicator.style.display = 'none';
+            }
+        }
 
         function showEmail(content) {
             // Backend sends raw email text as a string
@@ -944,6 +1077,26 @@
                 .map(p => `<p style="margin: 0 0 14px 0">${p.replace(/\n/g, '<br>')}</p>`)
                 .join('');
             emailPreview.classList.add('visible');
+        }
+
+        function showReceipt(content) {
+            receiptPreview.textContent = content || '';
+            receiptPreview.classList.add('visible');
+        }
+
+        function showSuspendedNotice(msg) {
+            const buyer = msg.buyer || 'Unknown';
+            toast.textContent = `Deal with ${buyer} suspended — on hold`;
+            toast.style.borderColor = '#FFA500';
+            toast.style.color = '#FFA500';
+            toast.style.background = 'rgba(255,165,0,0.08)';
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.style.borderColor = '';
+                toast.style.color = '';
+                toast.style.background = '';
+            }, 3000);
         }
 
         function renderInventory(items) {
@@ -1001,6 +1154,22 @@
             const revEl = document.getElementById('totalRev');
             const currentRev = parseInt(revEl.textContent.replace(/\D/g,'')) || 0;
             animateValue(revEl, currentRev, totalRev, 1000);
+        }
+
+        function renderSuspended(orders) {
+            if (!orders || orders.length === 0) return;
+            const container = document.getElementById('ordersList');
+            orders.forEach(o => {
+                const total = (o.agreed_price_eur || 0) * (o.quantity || 0);
+                container.innerHTML += `
+                    <div class="list-item" style="border-bottom-color: rgba(255,165,0,0.2);">
+                        <span class="order-buyer">${o.buyer_name}</span>
+                        <span>${o.item_name} (x${o.quantity})</span>
+                        <span class="order-suspended-badge">HELD</span>
+                        <span class="order-price" style="color: #FFA500;">&euro;${total.toLocaleString()}</span>
+                    </div>
+                `;
+            });
         }
 
         function showError(msg) {
