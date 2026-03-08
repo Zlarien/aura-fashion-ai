@@ -19,8 +19,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our modules
-from database import init_db, get_all_inventory, get_confirmed_orders, create_order, confirm_order
-from agents import agent_extract, agent_inventory_check, agent_strategist, agent_copywriter, run_pipeline
+from database import init_db, get_all_inventory, get_confirmed_orders, get_suspended_orders, create_order, confirm_order, suspend_order
+from agents import agent_extract, agent_inventory_check, agent_strategist, agent_copywriter, agent_receipt, run_pipeline, detect_voice_command
 from deepgram_client import DeepgramStreamer
 from cartesia_client import synthesize_speech
 from demo_data import (
@@ -62,8 +62,9 @@ async def api_inventory():
 @app.get("/api/orders")
 async def api_orders():
     orders = get_confirmed_orders()
+    suspended = get_suspended_orders()
     total = sum(o["agreed_price_eur"] * o["quantity"] for o in orders)
-    return {"orders": orders, "total_revenue": total}
+    return {"orders": orders, "suspended": suspended, "total_revenue": total}
 
 
 # ─── WebSocket Handler ───
@@ -90,12 +91,14 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
 
     async def send_inventory_update():
-        """Push current inventory + orders to frontend."""
+        """Push current inventory + orders + suspended to frontend."""
         items = get_all_inventory()
         orders = get_confirmed_orders()
+        suspended = get_suspended_orders()
         total = sum(o["agreed_price_eur"] * o["quantity"] for o in orders)
         await send_json({"type": "inventory", "items": items})
         await send_json({"type": "orders", "orders": orders, "total_revenue": total})
+        await send_json({"type": "suspended", "orders": suspended})
 
     # Send initial inventory on connect
     await send_inventory_update()
@@ -129,8 +132,22 @@ async def websocket_endpoint(websocket: WebSocket):
                             "is_final": is_final,
                         })
                         if is_final and transcript.strip():
-                            # Run the agent pipeline
-                            await handle_pipeline(transcript, session, send_json, send_inventory_update)
+                            # Check for voice commands first (confirm/suspend)
+                            voice_cmd = detect_voice_command(transcript)
+                            if voice_cmd == "confirm" and session.get("extracted"):
+                                await send_json({"type": "voice_command", "action": "confirm"})
+                                await handle_confirm(session, send_json, send_inventory_update)
+                            elif voice_cmd == "suspend" and session.get("extracted"):
+                                await send_json({"type": "voice_command", "action": "suspend"})
+                                await handle_suspend(session, send_json, send_inventory_update)
+                            elif voice_cmd and not session.get("extracted"):
+                                # Voice command but no active deal — ignore gracefully
+                                await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                                    "content": "No active deal to " + voice_cmd + ". Speak a deal first.",
+                                    "data": {}})
+                            else:
+                                # Regular deal transcript — run the agent pipeline
+                                await handle_pipeline(transcript, session, send_json, send_inventory_update)
 
                     try:
                         streamer = DeepgramStreamer(on_transcript)
@@ -155,12 +172,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif msg_type == "confirm":
                     await handle_confirm(session, send_json, send_inventory_update)
 
+                # ─── Suspend Order ───
+                elif msg_type == "suspend":
+                    await handle_suspend(session, send_json, send_inventory_update)
+
                 # ─── Inject Transcript (test mode, bypass Deepgram) ───
                 elif msg_type == "inject_transcript":
                     transcript = data.get("text", "")
                     if transcript:
                         await send_json({"type": "transcript", "text": transcript, "is_final": True})
-                        await handle_pipeline(transcript, session, send_json, send_inventory_update)
+                        # Check for voice commands first
+                        voice_cmd = detect_voice_command(transcript)
+                        if voice_cmd == "confirm" and session.get("extracted"):
+                            await send_json({"type": "voice_command", "action": "confirm"})
+                            await handle_confirm(session, send_json, send_inventory_update)
+                        elif voice_cmd == "suspend" and session.get("extracted"):
+                            await send_json({"type": "voice_command", "action": "suspend"})
+                            await handle_suspend(session, send_json, send_inventory_update)
+                        else:
+                            await handle_pipeline(transcript, session, send_json, send_inventory_update)
 
                 # ─── Get Inventory ───
                 elif msg_type == "get_inventory":
@@ -219,6 +249,10 @@ async def handle_pipeline(transcript: str, session: dict, send_json, send_invent
         # Generate TTS for voice summary
         try:
             voice_text = strategy.get("voice_summary", "Processing complete.")
+            # If no email was provided by the buyer, append a gentle ask
+            buyer_email = extracted.get("email")
+            if not buyer_email:
+                voice_text += " By the way, do you have an email for the buyer? It's optional but useful for the confirmation."
             audio_bytes = await synthesize_speech(voice_text)
             audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
             await send_json({"type": "tts_audio", "audio": audio_b64})
@@ -290,7 +324,7 @@ async def handle_demo(session: dict, send_json, send_inventory_update):
 # ─── Confirm Handler ───
 
 async def handle_confirm(session: dict, send_json, send_inventory_update):
-    """Handle order confirmation: run Agent 4, save email, update inventory."""
+    """Handle order confirmation: run Agent 4, save email, generate receipt if ACCEPT, update inventory."""
     extracted = session.get("extracted")
     strategy = session.get("strategy")
     order_id = session.get("order_id")
@@ -324,6 +358,28 @@ async def handle_confirm(session: dict, send_json, send_inventory_update):
             "content": email,
         })
 
+        # Generate payment receipt if action was ACCEPT (instant deal)
+        action = strategy.get("action", "")
+        if action == "ACCEPT" and order_id:
+            try:
+                if session.get("demo_mode"):
+                    receipt_text = generate_demo_receipt(extracted, strategy, order_id)
+                else:
+                    receipt_text = agent_receipt(extracted, strategy, order_id)
+                await send_json({
+                    "type": "agent_log",
+                    "agent": 5,
+                    "label": "RECEIPT",
+                    "content": "Payment receipt generated for instant ACCEPT",
+                    "data": {"receipt": receipt_text},
+                })
+                await send_json({
+                    "type": "payment_receipt",
+                    "content": receipt_text,
+                })
+            except Exception as e:
+                print(f"[Receipt Error] {e}")
+
         # Refresh inventory + orders on frontend
         await send_inventory_update()
 
@@ -336,6 +392,93 @@ async def handle_confirm(session: dict, send_json, send_inventory_update):
 
     except Exception as e:
         await send_json({"type": "error", "message": f"Confirmation error: {str(e)}"})
+
+
+def generate_demo_receipt(extracted: dict, strategy: dict, order_id: int) -> str:
+    """Generate a pre-baked receipt for demo mode (no API call)."""
+    from datetime import datetime
+    qty = strategy.get('suggested_quantity', extracted.get('quantity', 0))
+    price = strategy.get('suggested_price', extracted.get('price', 0))
+    total = qty * price
+    return f"""═══════════════════════════════════════════
+              MAISON AURA
+       Paris Fashion Week — AW25
+═══════════════════════════════════════════
+
+PAYMENT RECEIPT
+
+Receipt No:  AURA-{order_id:04d}
+Date:        {datetime.now().strftime('%d %B %Y')}
+
+───────────────────────────────────────────
+BILLED TO:
+  {extracted.get('buyer', 'Client')}
+  {extracted.get('store', '')}
+
+───────────────────────────────────────────
+ITEM DETAILS:
+
+  {extracted.get('item', 'Item')}
+  Quantity:    {qty} units
+  Unit Price:  EUR {price:,.2f}
+                              ────────────
+  SUBTOTAL:    EUR {total:,.2f}
+  TAX (0%):    EUR 0.00  (B2B Intra-EU)
+                              ────────────
+  TOTAL DUE:   EUR {total:,.2f}
+
+───────────────────────────────────────────
+Payment Terms: Net 30
+Bank: BNP Paribas — IBAN FR76 XXXX XXXX XXXX
+
+═══════════════════════════════════════════
+           Merci pour votre confiance.
+              Maison AURA, Paris
+═══════════════════════════════════════════"""
+
+
+# ─── Suspend Handler ───
+
+async def handle_suspend(session: dict, send_json, send_inventory_update):
+    """Suspend/hold an order — no stock deduction, deal kept on hold for later decision."""
+    order_id = session.get("order_id")
+    extracted = session.get("extracted")
+    strategy = session.get("strategy")
+
+    if not order_id:
+        await send_json({"type": "error", "message": "No active deal to suspend."})
+        return
+
+    try:
+        suspend_order(order_id)
+
+        await send_json({
+            "type": "agent_log",
+            "agent": 3,
+            "label": "STRATEGIST",
+            "content": "Deal SUSPENDED -- on hold for later decision. No stock deducted.",
+            "data": {"action": "SUSPEND", "order_id": order_id},
+        })
+
+        await send_json({
+            "type": "order_suspended",
+            "order_id": order_id,
+            "buyer": extracted.get("buyer", "Unknown") if extracted else "Unknown",
+            "store": extracted.get("store", "Unknown") if extracted else "Unknown",
+        })
+
+        # Refresh data
+        await send_inventory_update()
+
+        # Reset session for next deal
+        session["extracted"] = None
+        session["inventory_report"] = None
+        session["strategy"] = None
+        session["order_id"] = None
+        session["demo_mode"] = False
+
+    except Exception as e:
+        await send_json({"type": "error", "message": f"Suspend error: {str(e)}"})
 
 
 # ─── Startup ───

@@ -6,6 +6,7 @@ Tables: inventory (pre-seeded luxury items), orders (confirmed deals)
 import sqlite3
 import os
 from datetime import datetime
+from difflib import SequenceMatcher
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "inventory.db")
 
@@ -83,15 +84,72 @@ def get_all_inventory():
     return [dict(r) for r in rows]
 
 
-def find_item_by_name(name: str):
-    """Fuzzy match item by name (case-insensitive LIKE)."""
+def get_catalog_names() -> list[str]:
+    """Return all item names in the catalog — used to feed Agent 1 for accurate matching."""
     conn = get_connection()
+    rows = conn.execute("SELECT item_name FROM inventory").fetchall()
+    conn.close()
+    return [r["item_name"] for r in rows]
+
+
+def _fuzzy_score(a: str, b: str) -> float:
+    """Similarity ratio between two strings (0.0 to 1.0)."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def find_item_by_name(name: str):
+    """Find item by name with multi-layer matching:
+    1. Exact substring match (LIKE)
+    2. Word-overlap match (any word from query matches any word in item name)
+    3. Fuzzy match via SequenceMatcher (threshold 0.5)
+    """
+    if not name or not name.strip():
+        return None
+
+    conn = get_connection()
+    query = name.strip().lower()
+
+    # Layer 1: Direct LIKE match (fast path)
     row = conn.execute(
         "SELECT * FROM inventory WHERE LOWER(item_name) LIKE ?",
-        (f"%{name.lower()}%",),
+        (f"%{query}%",),
     ).fetchone()
+    if row:
+        conn.close()
+        return dict(row)
+
+    # Layer 2: Word-overlap — check if any significant word from query matches item names
+    all_items = conn.execute("SELECT * FROM inventory").fetchall()
+    query_words = [w for w in query.split() if len(w) > 2]  # skip tiny words
+
+    for item in all_items:
+        item_lower = item["item_name"].lower()
+        for word in query_words:
+            if word in item_lower:
+                conn.close()
+                return dict(item)
+
+    # Layer 3: Fuzzy match — find best SequenceMatcher score
+    best_score = 0.0
+    best_item = None
+    for item in all_items:
+        # Compare against full name and individual words
+        score = _fuzzy_score(query, item["item_name"])
+        # Also check each word pair for partial matches
+        for item_word in item["item_name"].lower().split():
+            for q_word in query_words:
+                word_score = _fuzzy_score(q_word, item_word)
+                score = max(score, word_score)
+        if score > best_score:
+            best_score = score
+            best_item = item
+
     conn.close()
-    return dict(row) if row else None
+
+    if best_score >= 0.5 and best_item:
+        return dict(best_item)
+
+    return None
 
 
 def check_stock(item_id: int, quantity: int):
@@ -142,13 +200,35 @@ def confirm_order(order_id: int, email_text: str):
         "UPDATE orders SET status = 'confirmed', confirmation_email = ? WHERE id = ?",
         (email_text, order_id),
     )
-    # Deduct stock
+    # Deduct stock (clamped to 0 — never go negative)
     order = conn.execute("SELECT item_id, quantity FROM orders WHERE id = ?", (order_id,)).fetchone()
     if order:
         conn.execute(
-            "UPDATE inventory SET stock_qty = stock_qty - ? WHERE id = ?",
+            "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?",
             (order["quantity"], order["item_id"]),
         )
+    conn.commit()
+    conn.close()
+
+
+def suspend_order(order_id: int):
+    """Suspend/hold an order — no stock deduction, keeps deal on hold for later decision."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE orders SET status = 'suspended' WHERE id = ?",
+        (order_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def resume_order(order_id: int):
+    """Move a suspended order back to pending for re-evaluation."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE orders SET status = 'pending' WHERE id = ?",
+        (order_id,),
+    )
     conn.commit()
     conn.close()
 
@@ -161,6 +241,20 @@ def get_confirmed_orders():
         FROM orders o
         JOIN inventory i ON o.item_id = i.id
         WHERE o.status = 'confirmed'
+        ORDER BY o.created_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_suspended_orders():
+    """Return all suspended/held orders with item names."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT o.*, i.item_name
+        FROM orders o
+        JOIN inventory i ON o.item_id = i.id
+        WHERE o.status = 'suspended'
         ORDER BY o.created_at DESC
     """).fetchall()
     conn.close()
