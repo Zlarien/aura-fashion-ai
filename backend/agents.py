@@ -1,15 +1,17 @@
 """
-AURA — 4-Agent AI Pipeline
-Agent 1: Data Extractor (voice → structured JSON)
-Agent 2: Inventory & Margin Checker (JSON → DB lookup → report)
-Agent 3: Deal Strategist (report → ACCEPT/COUNTER/UPSELL)
-Agent 4: Luxury Copywriter (deal → haute couture confirmation email)
+AURA — Multi-Agent AI Pipeline
+Agent 1: Data Extractor (voice -> structured JSON)
+Agent 2: Inventory & Margin Checker (JSON -> DB lookup -> report)
+Agent 3: Deal Strategist (report -> ACCEPT/COUNTER/UPSELL)
+Agent 4: Luxury Copywriter (deal -> haute couture confirmation email)
+Intent Classifier: Routes voice input to correct handler
 """
 
 import json
 import os
+import re
 from groq import Groq
-from database import find_item_by_name, check_stock, calculate_margin, get_catalog_names
+from database import find_item_by_name, check_stock, calculate_margin, get_catalog_names, find_item_by_model, get_model_assignments
 
 # Lazy client init — allows app to start without API key (for demo mode)
 _client = None
@@ -49,7 +51,7 @@ def _call_llm(system_prompt: str, user_message: str, json_mode: bool = False) ->
 
 def agent_extract(transcript: str) -> dict:
     """Parse chaotic voice input into structured deal data.
-    Includes catalog awareness and number tolerance for speech transcription errors."""
+    Includes catalog awareness, number tolerance, model references, and speech transcription error handling."""
 
     # Get current catalog items to feed the LLM
     try:
@@ -57,6 +59,16 @@ def agent_extract(transcript: str) -> dict:
         catalog_str = ", ".join(catalog)
     except Exception:
         catalog_str = "Obsidian Trench, Ivory Blazer, Noir Midi Dress, Crimson Silk Blouse, Glacial Cashmere Coat, Onyx Leather Jacket, Pearl Evening Gown, Slate Wool Trousers, Rose Gold Mini Bag, Midnight Velvet Suit"
+
+    # Get model assignments for context
+    try:
+        assignments = get_model_assignments()
+        model_context = "\n".join(
+            f"  - {a['model_name']} wore: {a['item_name']} ({a['event']})"
+            for a in assignments
+        ) if assignments else "  No model assignments yet."
+    except Exception:
+        model_context = "  No model assignments yet."
 
     system = f"""You are a data extraction agent for a luxury fashion B2B sales system at Paris Fashion Week.
 Extract the following fields from the sales rep's voice input:
@@ -71,29 +83,39 @@ Extract the following fields from the sales rep's voice input:
 CATALOG ITEMS (match the closest one, even if the pronunciation is slightly off):
 {catalog_str}
 
+MODEL REFERENCES (buyers may reference items by who wore them):
+{model_context}
+If the buyer says something like "I want 2 of what Jade Li wore" or "the dress that Jade Li had",
+resolve the model reference to the actual item name from the catalog.
+
 CRITICAL RULES FOR VOICE TRANSCRIPTION TOLERANCE:
 1. ITEM MATCHING: The speaker may mispronounce or Deepgram may mistranscribe item names.
    Match to the CLOSEST catalog item. Examples:
-   - "obsidian french" → "Obsidian Trench"
-   - "ivory blazing" → "Ivory Blazer"
-   - "glacial cashmere" → "Glacial Cashmere Coat"
-   - "midnight velvet" → "Midnight Velvet Suit"
-   - "rose gold bag" → "Rose Gold Mini Bag"
-   - "pearl gown" → "Pearl Evening Gown"
-   - "slate trousers" → "Slate Wool Trousers"
+   - "obsidian french" -> "Obsidian Trench"
+   - "ivory blazing" -> "Ivory Blazer"
+   - "glacial cashmere" -> "Glacial Cashmere Coat"
+   - "midnight velvet" -> "Midnight Velvet Suit"
+   - "rose gold bag" -> "Rose Gold Mini Bag"
+   - "pearl gown" -> "Pearl Evening Gown"
+   - "slate trousers" -> "Slate Wool Trousers"
+   - "crimson silk" or "crumsib silk" or "crimsin blouse" -> "Crimson Silk Blouse"
+   - "noir midi" or "black midi dress" or "noire midi" -> "Noir Midi Dress"
    Any partial match or phonetic similarity should resolve to the correct catalog item.
 
 2. NUMBER TOLERANCE: Speech-to-text often garbles numbers. Apply common sense:
-   - "a hundred and fifty" or "150" or "one fifty" → 150
-   - "twelve hundred" or "1200" → 1200
+   - "a hundred and fifty" or "150" or "one fifty" -> 150
+   - "twelve hundred" or "1200" -> 1200
    - If a quantity seems unreasonably large (>500 for fashion), it might be a price mistakenly placed
    - If a price seems unreasonably low (<50 for luxury fashion), it might be missing a zero
    - Reasonable quantity range: 1-500 units
-   - Reasonable price range: €200-€5000 per unit for luxury fashion
+   - Reasonable price range: EUR200-EUR5000 per unit for luxury fashion
 
 3. BUYER/STORE: Names may be mistranscribed. Use your best interpretation.
-   Common stores: Harrods, Selfridges, Galeries Lafayette, Le Bon Marché, Bergdorf Goodman,
+   Common stores: Harrods, Selfridges, Galeries Lafayette, Le Bon Marche, Bergdorf Goodman,
    Neiman Marcus, Saks Fifth Avenue, Barneys, Harvey Nichols, Printemps.
+
+4. EMAIL: If the buyer mentions an email address, extract it exactly.
+   Email addresses in speech may sound like "sophie at harrods dot com" -> "sophie@harrods.com"
 
 Return ONLY valid JSON with these exact keys: buyer, store, item, quantity, price, currency, email.
 If email was not mentioned, set it to null."""
@@ -228,32 +250,168 @@ Total: €{strategy.get('suggested_quantity', extracted.get('quantity', 0)) * st
     return _call_llm(system, context, json_mode=False)
 
 
-# ─── Voice Command Detection ───
+# ─── Intent Classification (Voice Router) ───
 
 # Keywords that trigger actions via voice instead of button clicks
 VOICE_COMMANDS = {
-    "confirm": ["confirm", "confirmed", "approve", "approved", "accept", "accepted", "go ahead", "let's do it", "deal", "done deal", "validate"],
-    "suspend": ["suspend", "suspended", "hold", "hold on", "put on hold", "wait", "pause", "not sure", "hold that", "keep it"],
+    "confirm": ["confirm", "confirmed", "approve", "approved", "accept", "accepted", "go ahead",
+                 "let's do it", "deal", "done deal", "validate", "yes confirm", "i confirm",
+                 "that's good", "we'll take it", "let's go", "alright confirm"],
+    "suspend": ["suspend", "suspended", "hold", "hold on", "put on hold", "wait", "pause",
+                "not sure", "hold that", "keep it", "let me think", "give me a moment",
+                "i'll get back to you", "hold off"],
 }
 
+# Patterns for stock addition (voice)
+STOCK_ADD_PATTERNS = [
+    r"(?:we |i )?\breceived?\b.*?\b(\d+)\b.*\bnew\b",
+    r"(?:we |i )?\bgot\b.*?\b(\d+)\b.*\bnew\b",
+    r"\badd\b.*?\b(\d+)\b.*\bstock\b",
+    r"\brestock\b.*?\b(\d+)\b",
+    r"\b(\d+)\b.*\bnew\b.*\b(?:units?|pieces?|items?)\b",
+    r"(?:we |i )?\breceived?\b.*?\b(\d+)\b",
+]
 
-def detect_voice_command(transcript: str) -> str | None:
-    """Check if transcript is a voice command rather than a new deal.
-    Returns 'confirm', 'suspend', or None (meaning it's a regular deal transcript).
-    Only matches if the transcript is SHORT (< 15 words) — longer utterances are deals."""
+# Patterns for email provision
+EMAIL_PATTERN = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
+
+# Patterns for model references
+MODEL_REFERENCE_PATTERNS = [
+    r"(?:what|the\s+(?:dress|item|piece|coat|suit|gown|jacket|blazer|blouse|trousers|bag))\s+(?:that\s+)?(\w+(?:\s+\w+)?)\s+(?:wore|had|was wearing|modeled|walked in|carried)",
+    r"(\w+(?:\s+\w+)?)\s+(?:wore|modeled|was wearing|walked in|had on)",
+    r"(?:same|like)\s+(\w+(?:\s+\w+)?)\s*(?:'s|wore|had)",
+    r"(?:can i|i want|i'd like|give me).*?(?:what|that|the one)\s+(\w+(?:\s+\w+)?)\s+(?:wore|had|modeled)",
+]
+
+
+def classify_intent(transcript: str, has_active_deal: bool = False) -> dict:
+    """Classify a voice transcript into one of several intents.
+    Returns dict with 'intent' key and relevant extracted data.
+
+    Intents:
+    - 'confirm': User wants to confirm the active deal
+    - 'suspend': User wants to suspend/hold the active deal
+    - 'email': User is providing an email address
+    - 'stock_add': User is reporting stock received
+    - 'model_query': User is asking about what a model wore
+    - 'model_assign': User is telling us a model wore something
+    - 'deal': Regular deal transcript (default)
+    """
     text = transcript.strip().lower()
     words = text.split()
 
-    # Long utterances are always deals, not commands
-    if len(words) > 15:
-        return None
+    # 1. Email detection — very specific, check first
+    email_match = EMAIL_PATTERN.search(transcript)
+    if email_match and len(words) < 25:
+        return {"intent": "email", "email": email_match.group(0), "transcript": transcript}
 
-    for action, keywords in VOICE_COMMANDS.items():
-        for kw in keywords:
-            if kw in text:
-                return action
+    # 2. Short utterances → check voice commands (confirm/suspend)
+    if len(words) <= 15:
+        for action, keywords in VOICE_COMMANDS.items():
+            for kw in keywords:
+                if kw in text:
+                    if has_active_deal:
+                        return {"intent": action, "transcript": transcript}
+                    else:
+                        # No active deal — might still be a voice command for future use
+                        # but don't trigger it without context
+                        break
 
+    # 3. Stock addition detection
+    for pattern in STOCK_ADD_PATTERNS:
+        match = re.search(pattern, text)
+        if match:
+            qty = int(match.group(1))
+            # Extract item name from the rest of the sentence
+            return {"intent": "stock_add", "quantity": qty, "transcript": transcript}
+
+    # 4. Model reference detection (query: "I want what Jade Li wore")
+    for pattern in MODEL_REFERENCE_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            model_name = match.group(1).strip()
+            # Check if it's a query ("I want what X wore") or assignment ("X wore the Y")
+            if any(kw in text for kw in ["i want", "can i", "i'd like", "give me", "same as", "like the"]):
+                return {"intent": "model_query", "model_name": model_name, "transcript": transcript}
+            elif any(kw in text for kw in ["wore", "was wearing", "modeled", "walked in", "had on"]):
+                return {"intent": "model_assign", "model_name": model_name, "transcript": transcript}
+
+    # 5. Default — it's a deal transcript
+    return {"intent": "deal", "transcript": transcript}
+
+
+def detect_voice_command(transcript: str) -> str | None:
+    """Legacy wrapper — check if transcript is a voice command.
+    Returns 'confirm', 'suspend', or None."""
+    result = classify_intent(transcript, has_active_deal=True)
+    if result["intent"] in ("confirm", "suspend"):
+        return result["intent"]
     return None
+
+
+# ─── Agent: Stock Addition Extractor ───
+
+def agent_extract_stock_add(transcript: str) -> dict:
+    """Extract item name and quantity from a stock addition voice command."""
+    try:
+        catalog = get_catalog_names()
+        catalog_str = ", ".join(catalog)
+    except Exception:
+        catalog_str = "Obsidian Trench, Ivory Blazer, Noir Midi Dress, Crimson Silk Blouse, Glacial Cashmere Coat, Onyx Leather Jacket, Pearl Evening Gown, Slate Wool Trousers, Rose Gold Mini Bag, Midnight Velvet Suit"
+
+    system = f"""You are a data extraction agent for a luxury fashion inventory system.
+The user is reporting that new stock has arrived. Extract:
+- item: the fashion item name — MUST match one from our catalog
+- quantity: number of units received (integer)
+
+CATALOG ITEMS (match the closest one):
+{catalog_str}
+
+Apply the same fuzzy matching rules as for deal extraction — mispronunciations and speech-to-text errors are expected.
+
+Return ONLY valid JSON with keys: item, quantity"""
+
+    raw = _call_llm(system, transcript, json_mode=True)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse stock addition", "raw": raw}
+
+
+# ─── Agent: Model Assignment Extractor ───
+
+def agent_extract_model_assign(transcript: str) -> dict:
+    """Extract model name and item from a model assignment voice command."""
+    try:
+        catalog = get_catalog_names()
+        catalog_str = ", ".join(catalog)
+    except Exception:
+        catalog_str = "Obsidian Trench, Ivory Blazer, Noir Midi Dress, Crimson Silk Blouse, Glacial Cashmere Coat, Onyx Leather Jacket, Pearl Evening Gown, Slate Wool Trousers, Rose Gold Mini Bag, Midnight Velvet Suit"
+
+    # Get existing model assignments for context
+    try:
+        assignments = get_model_assignments()
+        models_str = ", ".join(set(a["model_name"] for a in assignments)) if assignments else "No models assigned yet"
+    except Exception:
+        models_str = "No models assigned yet"
+
+    system = f"""You are a data extraction agent for a luxury fashion showroom.
+The user is telling you about a model who wore a specific item (e.g., during a runway show, fitting, or event).
+Extract:
+- model_name: the model's full name
+- item: the fashion item name — MUST match one from our catalog
+- event: the event context (e.g., "runway show", "pre-show fitting", "gala evening")
+
+CATALOG ITEMS: {catalog_str}
+KNOWN MODELS: {models_str}
+
+Return ONLY valid JSON with keys: model_name, item, event"""
+
+    raw = _call_llm(system, transcript, json_mode=True)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse model assignment", "raw": raw}
 
 
 # ─── Pipeline Runner ───

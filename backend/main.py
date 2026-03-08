@@ -19,8 +19,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our modules
-from database import init_db, get_all_inventory, get_confirmed_orders, get_suspended_orders, create_order, confirm_order, suspend_order
-from agents import agent_extract, agent_inventory_check, agent_strategist, agent_copywriter, agent_receipt, run_pipeline, detect_voice_command
+from database import (
+    init_db, get_all_inventory, get_confirmed_orders, get_suspended_orders,
+    create_order, confirm_order, suspend_order, reset_inventory, add_stock,
+    deduct_stock_external, assign_model, find_item_by_model, get_model_assignments,
+    find_item_by_name,
+)
+from agents import (
+    agent_extract, agent_inventory_check, agent_strategist, agent_copywriter,
+    agent_receipt, run_pipeline, detect_voice_command, classify_intent,
+    agent_extract_stock_add, agent_extract_model_assign,
+)
 from deepgram_client import DeepgramStreamer
 from cartesia_client import synthesize_speech
 from demo_data import (
@@ -132,22 +141,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             "is_final": is_final,
                         })
                         if is_final and transcript.strip():
-                            # Check for voice commands first (confirm/suspend)
-                            voice_cmd = detect_voice_command(transcript)
-                            if voice_cmd == "confirm" and session.get("extracted"):
-                                await send_json({"type": "voice_command", "action": "confirm"})
-                                await handle_confirm(session, send_json, send_inventory_update)
-                            elif voice_cmd == "suspend" and session.get("extracted"):
-                                await send_json({"type": "voice_command", "action": "suspend"})
-                                await handle_suspend(session, send_json, send_inventory_update)
-                            elif voice_cmd and not session.get("extracted"):
-                                # Voice command but no active deal — ignore gracefully
-                                await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
-                                    "content": "No active deal to " + voice_cmd + ". Speak a deal first.",
-                                    "data": {}})
-                            else:
-                                # Regular deal transcript — run the agent pipeline
-                                await handle_pipeline(transcript, session, send_json, send_inventory_update)
+                            has_active = bool(session.get("extracted"))
+                            intent = classify_intent(transcript, has_active_deal=has_active)
+                            await handle_intent(intent, session, send_json, send_inventory_update)
 
                     try:
                         streamer = DeepgramStreamer(on_transcript)
@@ -181,20 +177,83 @@ async def websocket_endpoint(websocket: WebSocket):
                     transcript = data.get("text", "")
                     if transcript:
                         await send_json({"type": "transcript", "text": transcript, "is_final": True})
-                        # Check for voice commands first
-                        voice_cmd = detect_voice_command(transcript)
-                        if voice_cmd == "confirm" and session.get("extracted"):
-                            await send_json({"type": "voice_command", "action": "confirm"})
-                            await handle_confirm(session, send_json, send_inventory_update)
-                        elif voice_cmd == "suspend" and session.get("extracted"):
-                            await send_json({"type": "voice_command", "action": "suspend"})
-                            await handle_suspend(session, send_json, send_inventory_update)
-                        else:
-                            await handle_pipeline(transcript, session, send_json, send_inventory_update)
+                        has_active = bool(session.get("extracted"))
+                        intent = classify_intent(transcript, has_active_deal=has_active)
+                        await handle_intent(intent, session, send_json, send_inventory_update)
 
                 # ─── Get Inventory ───
                 elif msg_type == "get_inventory":
                     await send_inventory_update()
+
+                # ─── Reset Inventory ───
+                elif msg_type == "reset":
+                    reset_inventory()
+                    await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                        "content": "Inventory reset to original stock levels. All orders cleared.", "data": {}})
+                    await send_json({"type": "inventory_reset"})
+                    await send_inventory_update()
+                    # Reset session too
+                    session["extracted"] = None
+                    session["inventory_report"] = None
+                    session["strategy"] = None
+                    session["order_id"] = None
+                    session["demo_mode"] = False
+
+                # ─── Colleague Stock Deduction Simulation ───
+                elif msg_type == "colleague_deduct":
+                    item_name = data.get("item", "Crimson Silk Blouse")
+                    qty = data.get("quantity", 30)
+                    colleague = data.get("colleague", "Marc (Showroom B)")
+                    result = deduct_stock_external(item_name, qty, colleague)
+                    if result:
+                        await send_json({"type": "agent_log", "agent": 0, "label": "ALERT",
+                            "content": f"Stock alert: {colleague} just sold {qty}x {result['item_name']}. Remaining: {result['stock_qty']}",
+                            "data": {"colleague": colleague, "item": result["item_name"], "deducted": qty, "remaining": result["stock_qty"]}})
+                        await send_json({"type": "stock_alert", "colleague": colleague,
+                            "item_name": result["item_name"], "quantity_deducted": qty, "remaining_stock": result["stock_qty"]})
+                        await send_inventory_update()
+                        # TTS alert
+                        try:
+                            audio_bytes = await synthesize_speech(f"Heads up: {colleague} just sold {qty} units of {result['item_name']}. Only {result['stock_qty']} left.")
+                            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                            await send_json({"type": "tts_audio", "audio": audio_b64})
+                        except Exception:
+                            pass
+
+                # ─── Colleague Competing Order Simulation ───
+                elif msg_type == "colleague_order":
+                    # Simulate another rep putting a hold on a similar item
+                    item_name = data.get("item", "")
+                    qty = data.get("quantity", 0)
+                    buyer = data.get("buyer", "Unknown Buyer")
+                    colleague = data.get("colleague", "Elise (Showroom C)")
+
+                    # If no item provided, use current deal's item
+                    if not item_name and session.get("extracted"):
+                        item_name = session["extracted"].get("item", "Crimson Silk Blouse")
+                    elif not item_name:
+                        item_name = "Crimson Silk Blouse"
+                    if not qty:
+                        qty = 20
+
+                    # Create the competing suspended order
+                    item = find_item_by_name(item_name)
+                    if item:
+                        order_id = create_order(buyer, f"{colleague}'s client", item["id"], qty, 0)
+                        suspend_order(order_id)
+                        await send_json({"type": "agent_log", "agent": 0, "label": "ALERT",
+                            "content": f"Competing order: {colleague} has a pending deal for {qty}x {item['item_name']} from {buyer}. Stock pressure!",
+                            "data": {"colleague": colleague, "item": item["item_name"], "quantity": qty, "buyer": buyer}})
+                        await send_json({"type": "competing_order", "colleague": colleague,
+                            "item_name": item["item_name"], "quantity": qty, "buyer": buyer})
+                        await send_inventory_update()
+                        # TTS alert
+                        try:
+                            audio_bytes = await synthesize_speech(f"Alert: {colleague} also has a pending order for {qty} units of {item['item_name']}. You might want to close this deal quickly.")
+                            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                            await send_json({"type": "tts_audio", "audio": audio_b64})
+                        except Exception:
+                            pass
 
     except WebSocketDisconnect:
         pass
@@ -203,6 +262,171 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if session["deepgram"]:
             await session["deepgram"].stop()
+
+
+# ─── Intent Router ───
+
+async def handle_intent(intent: dict, session: dict, send_json, send_inventory_update):
+    """Route classified intent to appropriate handler."""
+    intent_type = intent.get("intent", "deal")
+    transcript = intent.get("transcript", "")
+
+    if intent_type == "confirm" and session.get("extracted"):
+        await send_json({"type": "voice_command", "action": "confirm"})
+        await handle_confirm(session, send_json, send_inventory_update)
+
+    elif intent_type == "suspend" and session.get("extracted"):
+        await send_json({"type": "voice_command", "action": "suspend"})
+        await handle_suspend(session, send_json, send_inventory_update)
+
+    elif intent_type == "confirm" or intent_type == "suspend":
+        # Voice command but no active deal
+        await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+            "content": f"No active deal to {intent_type}. Speak a deal first.", "data": {}})
+
+    elif intent_type == "email":
+        await handle_email_intent(intent, session, send_json)
+
+    elif intent_type == "stock_add":
+        await handle_stock_add(intent, session, send_json, send_inventory_update)
+
+    elif intent_type == "model_query":
+        await handle_model_query(intent, session, send_json, send_inventory_update)
+
+    elif intent_type == "model_assign":
+        await handle_model_assign(intent, session, send_json, send_inventory_update)
+
+    else:
+        # Default: regular deal transcript
+        await handle_pipeline(transcript, session, send_json, send_inventory_update)
+
+
+# ─── Email Intent Handler ───
+
+async def handle_email_intent(intent: dict, session: dict, send_json):
+    """Handle email provided by voice -- attach to active session if exists."""
+    email = intent.get("email", "")
+    if session.get("extracted"):
+        session["extracted"]["email"] = email
+        await send_json({"type": "agent_log", "agent": 1, "label": "EXTRACTOR",
+            "content": f"Email captured by voice: {email}", "data": {"email": email}})
+        await send_json({"type": "email_captured", "email": email})
+        # TTS confirmation
+        try:
+            audio_bytes = await synthesize_speech(f"Got it, I've noted the email {email}.")
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            await send_json({"type": "tts_audio", "audio": audio_b64})
+        except Exception as e:
+            print(f"[TTS Error] {e}")
+    else:
+        await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+            "content": f"Email noted: {email} -- will attach to next deal.", "data": {"email": email}})
+        session["pending_email"] = email
+
+
+# ─── Stock Add Handler ───
+
+async def handle_stock_add(intent: dict, session: dict, send_json, send_inventory_update):
+    """Handle voice stock addition: 'we received 50 new Crimson Silk Blouse'."""
+    transcript = intent.get("transcript", "")
+    await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+        "content": "Detected stock addition request -- extracting details...", "data": {}})
+
+    try:
+        extracted = agent_extract_stock_add(transcript)
+        item_name = extracted.get("item", "")
+        quantity = extracted.get("quantity", 0)
+
+        if not item_name or not quantity:
+            await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                "content": "Could not extract item or quantity from stock addition request.", "data": extracted})
+            return
+
+        result = add_stock(item_name, quantity)
+        if result:
+            await send_json({"type": "agent_log", "agent": 0, "label": "INVENTORY",
+                "content": f"Stock added: +{quantity} {result['item_name']} (now {result['stock_qty']} total)",
+                "data": {"item": result["item_name"], "added": quantity, "new_total": result["stock_qty"]}})
+            await send_json({"type": "stock_added", "item_name": result["item_name"],
+                "quantity_added": quantity, "new_stock": result["stock_qty"]})
+            await send_inventory_update()
+            # TTS feedback
+            try:
+                audio_bytes = await synthesize_speech(f"Done. Added {quantity} units of {result['item_name']}. New total: {result['stock_qty']}.")
+                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                await send_json({"type": "tts_audio", "audio": audio_b64})
+            except Exception:
+                pass
+        else:
+            await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                "content": f"Could not find item '{item_name}' in inventory to add stock.", "data": {}})
+    except Exception as e:
+        await send_json({"type": "error", "message": f"Stock add error: {str(e)}"})
+
+
+# ─── Model Query Handler ───
+
+async def handle_model_query(intent: dict, session: dict, send_json, send_inventory_update):
+    """Handle 'I want what Jade Li wore' -- resolve model to item and run deal pipeline."""
+    model_name = intent.get("model_name", "")
+    transcript = intent.get("transcript", "")
+
+    items = find_item_by_model(model_name)
+    if items:
+        item = items[0]  # Take the first match
+        await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+            "content": f"Model reference resolved: {item['model_name']} wore {item['item_name']} ({item['event']})",
+            "data": {"model": item["model_name"], "item": item["item_name"], "event": item["event"]}})
+        await send_json({"type": "model_resolved", "model_name": item["model_name"],
+            "item_name": item["item_name"], "event": item["event"]})
+        # Run the pipeline with the original transcript -- Agent 1 already has model context
+        await handle_pipeline(transcript, session, send_json, send_inventory_update)
+    else:
+        await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+            "content": f"No items found for model '{model_name}'. Check model name and try again.", "data": {}})
+        try:
+            audio_bytes = await synthesize_speech(f"Sorry, I don't have any items associated with {model_name}.")
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            await send_json({"type": "tts_audio", "audio": audio_b64})
+        except Exception:
+            pass
+
+
+# ─── Model Assign Handler ───
+
+async def handle_model_assign(intent: dict, session: dict, send_json, send_inventory_update):
+    """Handle 'Jade Li wore the Noir Midi Dress' -- assign model to item."""
+    transcript = intent.get("transcript", "")
+
+    try:
+        extracted = agent_extract_model_assign(transcript)
+        model_name = extracted.get("model_name", "")
+        item_name = extracted.get("item", "")
+        event = extracted.get("event", "runway show")
+
+        if not model_name or not item_name:
+            await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                "content": "Could not extract model or item from assignment request.", "data": extracted})
+            return
+
+        result = assign_model(model_name, item_name, event)
+        if result:
+            await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                "content": f"Model assigned: {result['model_name']} -> {result['item_name']} ({result['event']})",
+                "data": result})
+            await send_json({"type": "model_assigned", "model_name": result["model_name"],
+                "item_name": result["item_name"], "event": result["event"]})
+            try:
+                audio_bytes = await synthesize_speech(f"Noted. {result['model_name']} wore the {result['item_name']} at the {result['event']}.")
+                audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                await send_json({"type": "tts_audio", "audio": audio_b64})
+            except Exception:
+                pass
+        else:
+            await send_json({"type": "agent_log", "agent": 0, "label": "AURA",
+                "content": f"Could not find item '{item_name}' in catalog for model assignment.", "data": {}})
+    except Exception as e:
+        await send_json({"type": "error", "message": f"Model assignment error: {str(e)}"})
 
 
 # ─── Pipeline Handler (Live Mode) ───
@@ -221,6 +445,10 @@ async def handle_pipeline(transcript: str, session: dict, send_json, send_invent
 
     try:
         extracted, inventory_report, strategy = await run_pipeline(transcript, send_log)
+
+        # Attach pending email from voice if available
+        if session.get("pending_email") and not extracted.get("email"):
+            extracted["email"] = session.pop("pending_email")
 
         session["extracted"] = extracted
         session["inventory_report"] = inventory_report

@@ -49,14 +49,26 @@ def init_db():
         )
     """)
 
+    # Model assignments: which model wore which item (runway / pre-show)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS model_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT NOT NULL,
+            item_id INTEGER NOT NULL,
+            event TEXT NOT NULL DEFAULT 'runway show',
+            assigned_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES inventory(id)
+        )
+    """)
+
     # Seed inventory if empty
     count = cursor.execute("SELECT COUNT(*) FROM inventory").fetchone()[0]
     if count == 0:
         seed_data = [
             ("Obsidian Trench", "AW25 Noir", "Black", 120, 850.00, 35.0),
-            ("Ivory Blazer", "SS25 Lumière", "Ivory", 80, 620.00, 40.0),
+            ("Ivory Blazer", "SS25 Lumiere", "Ivory", 80, 620.00, 40.0),
             ("Noir Midi Dress", "AW25 Noir", "Black", 200, 480.00, 45.0),
-            ("Crimson Silk Blouse", "SS25 Lumière", "Red", 150, 320.00, 50.0),
+            ("Crimson Silk Blouse", "SS25 Lumiere", "Red", 150, 320.00, 50.0),
             ("Glacial Cashmere Coat", "AW25 Noir", "Ice Blue", 45, 1200.00, 30.0),
             ("Onyx Leather Jacket", "AW25 Noir", "Black", 60, 980.00, 35.0),
             ("Pearl Evening Gown", "Gala Collection", "Champagne", 30, 2100.00, 25.0),
@@ -69,8 +81,40 @@ def init_db():
             seed_data,
         )
 
+    # Seed model assignments if empty
+    model_count = cursor.execute("SELECT COUNT(*) FROM model_assignments").fetchone()[0]
+    if model_count == 0:
+        model_seeds = [
+            ("Jade Li", 3, "pre-show fitting"),       # Noir Midi Dress
+            ("Amara Osei", 1, "runway show"),           # Obsidian Trench
+            ("Sofia Vidal", 7, "gala evening"),         # Pearl Evening Gown
+            ("Lena Richter", 6, "runway show"),         # Onyx Leather Jacket
+            ("Yuki Tanaka", 10, "runway show"),         # Midnight Velvet Suit
+        ]
+        for model_name, item_id, event in model_seeds:
+            cursor.execute(
+                "INSERT INTO model_assignments (model_name, item_id, event, assigned_at) VALUES (?, ?, ?, ?)",
+                (model_name, item_id, event, datetime.now().isoformat()),
+            )
+
     conn.commit()
     conn.close()
+
+
+# ─── Seed Data (for reset) ───
+
+SEED_INVENTORY = [
+    ("Obsidian Trench", "AW25 Noir", "Black", 120, 850.00, 35.0),
+    ("Ivory Blazer", "SS25 Lumiere", "Ivory", 80, 620.00, 40.0),
+    ("Noir Midi Dress", "AW25 Noir", "Black", 200, 480.00, 45.0),
+    ("Crimson Silk Blouse", "SS25 Lumiere", "Red", 150, 320.00, 50.0),
+    ("Glacial Cashmere Coat", "AW25 Noir", "Ice Blue", 45, 1200.00, 30.0),
+    ("Onyx Leather Jacket", "AW25 Noir", "Black", 60, 980.00, 35.0),
+    ("Pearl Evening Gown", "Gala Collection", "Champagne", 30, 2100.00, 25.0),
+    ("Slate Wool Trousers", "AW25 Noir", "Charcoal", 180, 380.00, 45.0),
+    ("Rose Gold Mini Bag", "Accessories", "Rose Gold", 250, 290.00, 55.0),
+    ("Midnight Velvet Suit", "AW25 Noir", "Navy", 15, 1450.00, 30.0),
+]
 
 
 # ─── Query Functions ───
@@ -256,6 +300,110 @@ def get_suspended_orders():
         JOIN inventory i ON o.item_id = i.id
         WHERE o.status = 'suspended'
         ORDER BY o.created_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─── Stock Management ───
+
+
+def reset_inventory():
+    """Reset all inventory to original seed quantities and clear orders + model assignments."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Reset stock quantities to seed values
+    for name, collection, color, qty, price, margin in SEED_INVENTORY:
+        cursor.execute(
+            "UPDATE inventory SET stock_qty = ?, wholesale_price_eur = ?, min_margin_pct = ? WHERE item_name = ?",
+            (qty, price, margin, name),
+        )
+    # Clear all orders
+    cursor.execute("DELETE FROM orders")
+    conn.commit()
+    conn.close()
+
+
+def add_stock(item_name: str, quantity: int) -> dict | None:
+    """Add stock to an item by name (fuzzy matched). Returns updated item or None."""
+    item = find_item_by_name(item_name)
+    if not item:
+        return None
+    conn = get_connection()
+    conn.execute(
+        "UPDATE inventory SET stock_qty = stock_qty + ? WHERE id = ?",
+        (quantity, item["id"]),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM inventory WHERE id = ?", (item["id"],)).fetchone()
+    conn.close()
+    return dict(updated) if updated else None
+
+
+def deduct_stock_external(item_name: str, quantity: int, colleague: str = "colleague") -> dict | None:
+    """Simulate a colleague deducting stock. Returns updated item or None."""
+    item = find_item_by_name(item_name)
+    if not item:
+        return None
+    conn = get_connection()
+    conn.execute(
+        "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?) WHERE id = ?",
+        (quantity, item["id"]),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM inventory WHERE id = ?", (item["id"],)).fetchone()
+    conn.close()
+    return dict(updated) if updated else None
+
+
+# ─── Model Assignments ───
+
+
+def assign_model(model_name: str, item_name: str, event: str = "runway show") -> dict | None:
+    """Assign a model to an item (e.g., 'Jade Li wore the Noir Midi Dress')."""
+    item = find_item_by_name(item_name)
+    if not item:
+        return None
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO model_assignments (model_name, item_id, event, assigned_at) VALUES (?, ?, ?, ?)",
+        (model_name, item["id"], event, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return {"model_name": model_name, "item_name": item["item_name"], "event": event}
+
+
+def find_item_by_model(model_name: str) -> list[dict]:
+    """Find all items worn/assigned to a model. Returns list of items with model info."""
+    conn = get_connection()
+    # Fuzzy match model name
+    rows = conn.execute("""
+        SELECT ma.model_name, ma.event, i.*
+        FROM model_assignments ma
+        JOIN inventory i ON ma.item_id = i.id
+    """).fetchall()
+    conn.close()
+
+    query = model_name.strip().lower()
+    results = []
+    for row in rows:
+        row_dict = dict(row)
+        name_lower = row_dict["model_name"].lower()
+        # Exact or partial match
+        if query in name_lower or name_lower in query or _fuzzy_score(query, name_lower) >= 0.6:
+            results.append(row_dict)
+    return results
+
+
+def get_model_assignments() -> list[dict]:
+    """Return all model assignments with item names."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT ma.model_name, ma.event, i.item_name, i.id as item_id
+        FROM model_assignments ma
+        JOIN inventory i ON ma.item_id = i.id
+        ORDER BY ma.assigned_at DESC
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]

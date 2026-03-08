@@ -576,6 +576,61 @@
             body { overflow: auto; }
             .right-bottom { flex-direction: column; height: auto; }
         }
+
+        /* Model tag on inventory items */
+        .model-tag {
+            font-family: var(--font-mono);
+            font-size: 8px;
+            color: var(--accent-gold);
+            border: 1px solid rgba(201,168,76,0.3);
+            padding: 1px 5px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+
+        /* Stock flash animation — inventory row highlight on change */
+        @keyframes stock-flash {
+            0% { background: rgba(201,168,76,0.3); }
+            100% { background: transparent; }
+        }
+
+        .stock-flash {
+            animation: stock-flash 1.5s ease-out;
+        }
+
+        /* Alert toast variant — for colleague events */
+        .toast.alert {
+            border-color: #ff3333;
+            color: #ff3333;
+            background: rgba(255,51,51,0.08);
+        }
+
+        .toast.gold {
+            border-color: var(--accent-gold);
+            color: var(--accent-gold);
+            background: rgba(201,168,76,0.08);
+        }
+
+        .toast.success {
+            border-color: var(--accent-neon);
+            color: var(--accent-neon);
+            background: rgba(57,255,20,0.08);
+        }
+
+        /* Keyboard shortcut hint */
+        .shortcut-hint {
+            position: fixed;
+            bottom: 60px;
+            right: 20px;
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: var(--text-secondary);
+            letter-spacing: 0.05em;
+            opacity: 0.5;
+            z-index: 50;
+        }
     </style>
 </head>
 <body>
@@ -679,6 +734,10 @@
         </div>
     </div>
 
+    <div class="shortcut-hint">
+        SHIFT+D Demo &nbsp;|&nbsp; SHIFT+R Reset &nbsp;|&nbsp; SHIFT+C Colleague &nbsp;|&nbsp; SHIFT+P Pending
+    </div>
+
     <div class="toast" id="toast">Error message</div>
 
     <script>
@@ -697,6 +756,17 @@
         const stockBar = document.getElementById('stockBar');
         const emailPreview = document.getElementById('emailPreview');
         const receiptPreview = document.getElementById('receiptPreview');
+
+        let modelAssignments = {};  // item_name -> model info
+
+        // Pre-seeded model assignments (matching database seeds)
+        modelAssignments = {
+            'Noir Midi Dress': 'Jade Li',
+            'Obsidian Trench': 'Amara Osei',
+            'Pearl Evening Gown': 'Sofia Vidal',
+            'Onyx Leather Jacket': 'Lena Richter',
+            'Midnight Velvet Suit': 'Yuki Tanaka',
+        };
 
         // WebSocket Setup
         let ws;
@@ -801,6 +871,31 @@
                     break;
                 case 'recording_stopped':
                     console.log('Recording session stopped on backend');
+                    break;
+                case 'stock_added':
+                    showToast(`+${msg.quantity_added} ${msg.item_name} added to stock (total: ${msg.new_stock})`, 'success');
+                    flashInventoryItem(msg.item_name);
+                    break;
+                case 'model_assigned':
+                    modelAssignments[msg.item_name] = msg.model_name;
+                    showToast(`Model assigned: ${msg.model_name} \u2192 ${msg.item_name} (${msg.event})`, 'gold');
+                    break;
+                case 'model_resolved':
+                    showToast(`Model reference: ${msg.model_name} wore ${msg.item_name} (${msg.event})`, 'gold');
+                    break;
+                case 'stock_alert':
+                    showToast(`ALERT: ${msg.colleague} sold ${msg.quantity_deducted}x ${msg.item_name}! Only ${msg.remaining_stock} left`, 'alert');
+                    flashInventoryItem(msg.item_name);
+                    break;
+                case 'competing_order':
+                    showToast(`COMPETING ORDER: ${msg.colleague} has ${msg.quantity}x ${msg.item_name} pending for ${msg.buyer}`, 'alert');
+                    flashInventoryItem(msg.item_name);
+                    break;
+                case 'inventory_reset':
+                    showToast('Inventory reset to original stock levels', 'success');
+                    break;
+                case 'email_captured':
+                    showToast(`Email captured: ${msg.email}`, 'gold');
                     break;
             }
         }
@@ -1107,10 +1202,13 @@
                 const pct = ((item.stock_qty || 0) / maxStock) * 100;
                 let color = pct > 75 ? 'var(--accent-color)' : (pct > 25 ? '#FFA500' : '#ff3333');
                 const critical = item.stock_qty === 0;
+                const modelTag = modelAssignments[item.item_name] 
+                    ? `<span class="model-tag">${modelAssignments[item.item_name]}</span>` 
+                    : '';
                 
                 container.innerHTML += `
                     <div class="list-item" style="${critical ? 'background: rgba(255,51,51,0.08); border-bottom-color: rgba(255,51,51,0.2);' : ''}">
-                        <span class="inv-name" style="${critical ? 'color: #ff3333; font-weight: 600;' : ''}">${item.item_name}</span>
+                        <span class="inv-name" style="${critical ? 'color: #ff3333; font-weight: 600;' : ''}">${item.item_name}${modelTag}</span>
                         <span style="font-family: var(--font-mono); min-width: 30px; text-align: right; ${critical ? 'color: #ff3333; font-weight: 600;' : ''}">${item.stock_qty}</span>
                         <div class="inv-stock-container">
                             <div class="inv-stock-fill" style="width: ${pct}%; background: ${color}"></div>
@@ -1172,18 +1270,78 @@
             });
         }
 
-        function showError(msg) {
-            toast.textContent = msg;
+        function showToast(message, variant = 'default') {
+            toast.textContent = message;
+            // Style variants
+            const variants = {
+                alert:   { border: '#ff3333', color: '#ff3333', bg: 'rgba(255,51,51,0.08)' },
+                gold:    { border: 'var(--accent-gold)', color: 'var(--accent-gold)', bg: 'rgba(201,168,76,0.08)' },
+                success: { border: 'var(--accent-neon)', color: 'var(--accent-neon)', bg: 'rgba(57,255,20,0.08)' },
+                default: { border: '#ff3333', color: '#ff3333', bg: 'rgba(255,51,51,0.08)' },
+            };
+            const v = variants[variant] || variants.default;
+            toast.style.borderColor = v.border;
+            toast.style.color = v.color;
+            toast.style.background = v.bg;
             toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 3000);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                toast.style.borderColor = '';
+                toast.style.color = '';
+                toast.style.background = '';
+            }, 4000);
+        }
+
+        function flashInventoryItem(itemName) {
+            const items = document.querySelectorAll('#inventoryList .list-item');
+            items.forEach(el => {
+                if (el.querySelector('.inv-name')?.textContent?.toLowerCase().includes(itemName.toLowerCase())) {
+                    el.classList.add('stock-flash');
+                    setTimeout(() => el.classList.remove('stock-flash'), 1500);
+                }
+            });
+        }
+
+        function showError(msg) {
+            showToast(msg, 'default');
         }
 
         // Demo Mode (Shift+D)
         document.addEventListener('keydown', (e) => {
-            if(e.shiftKey && e.key.toLowerCase() === 'd') {
-                if(ws && isConnected) {
+            if (!e.shiftKey) return;
+            const key = e.key.toLowerCase();
+            
+            if (key === 'd') {
+                // Demo mode
+                if (ws && isConnected) {
                     ws.send(JSON.stringify({ type: 'demo' }));
                     demoIndicator.style.display = 'block';
+                }
+            } else if (key === 'r') {
+                // Reset inventory
+                if (ws && isConnected) {
+                    ws.send(JSON.stringify({ type: 'reset' }));
+                }
+            } else if (key === 'c') {
+                // Colleague stock deduction simulation
+                if (ws && isConnected) {
+                    ws.send(JSON.stringify({
+                        type: 'colleague_deduct',
+                        item: 'Crimson Silk Blouse',
+                        quantity: 30,
+                        colleague: 'Marc (Showroom B)'
+                    }));
+                }
+            } else if (key === 'p') {
+                // Competing pending order simulation
+                if (ws && isConnected) {
+                    ws.send(JSON.stringify({
+                        type: 'colleague_order',
+                        item: '',
+                        quantity: 20,
+                        buyer: 'Bergdorf Goodman VIP',
+                        colleague: 'Elise (Showroom C)'
+                    }));
                 }
             }
         });
