@@ -9,7 +9,7 @@ Agent 4: Luxury Copywriter (deal → haute couture confirmation email)
 import json
 import os
 from groq import Groq
-from database import find_item_by_name, check_stock, calculate_margin
+from database import find_item_by_name, check_stock, calculate_margin, get_catalog_names
 
 # Lazy client init — allows app to start without API key (for demo mode)
 _client = None
@@ -48,18 +48,55 @@ def _call_llm(system_prompt: str, user_message: str, json_mode: bool = False) ->
 # ─── Agent 1: Data Extractor ───
 
 def agent_extract(transcript: str) -> dict:
-    """Parse chaotic voice input into structured deal data."""
-    system = """You are a data extraction agent for a luxury fashion B2B sales system.
+    """Parse chaotic voice input into structured deal data.
+    Includes catalog awareness and number tolerance for speech transcription errors."""
+
+    # Get current catalog items to feed the LLM
+    try:
+        catalog = get_catalog_names()
+        catalog_str = ", ".join(catalog)
+    except Exception:
+        catalog_str = "Obsidian Trench, Ivory Blazer, Noir Midi Dress, Crimson Silk Blouse, Glacial Cashmere Coat, Onyx Leather Jacket, Pearl Evening Gown, Slate Wool Trousers, Rose Gold Mini Bag, Midnight Velvet Suit"
+
+    system = f"""You are a data extraction agent for a luxury fashion B2B sales system at Paris Fashion Week.
 Extract the following fields from the sales rep's voice input:
 - buyer: the person's name (the buyer/contact)
 - store: the store or company name
-- item: the fashion item name
+- item: the fashion item name — MUST match one from our catalog (see below)
 - quantity: number of units (integer)
 - price: the proposed price per unit (number)
 - currency: the currency (default EUR if not specified)
+- email: the buyer's email address if mentioned (null if not provided)
 
-Return ONLY valid JSON with these exact keys. If a field is unclear, use your best guess from context.
-Always output JSON, nothing else."""
+CATALOG ITEMS (match the closest one, even if the pronunciation is slightly off):
+{catalog_str}
+
+CRITICAL RULES FOR VOICE TRANSCRIPTION TOLERANCE:
+1. ITEM MATCHING: The speaker may mispronounce or Deepgram may mistranscribe item names.
+   Match to the CLOSEST catalog item. Examples:
+   - "obsidian french" → "Obsidian Trench"
+   - "ivory blazing" → "Ivory Blazer"
+   - "glacial cashmere" → "Glacial Cashmere Coat"
+   - "midnight velvet" → "Midnight Velvet Suit"
+   - "rose gold bag" → "Rose Gold Mini Bag"
+   - "pearl gown" → "Pearl Evening Gown"
+   - "slate trousers" → "Slate Wool Trousers"
+   Any partial match or phonetic similarity should resolve to the correct catalog item.
+
+2. NUMBER TOLERANCE: Speech-to-text often garbles numbers. Apply common sense:
+   - "a hundred and fifty" or "150" or "one fifty" → 150
+   - "twelve hundred" or "1200" → 1200
+   - If a quantity seems unreasonably large (>500 for fashion), it might be a price mistakenly placed
+   - If a price seems unreasonably low (<50 for luxury fashion), it might be missing a zero
+   - Reasonable quantity range: 1-500 units
+   - Reasonable price range: €200-€5000 per unit for luxury fashion
+
+3. BUYER/STORE: Names may be mistranscribed. Use your best interpretation.
+   Common stores: Harrods, Selfridges, Galeries Lafayette, Le Bon Marché, Bergdorf Goodman,
+   Neiman Marcus, Saks Fifth Avenue, Barneys, Harvey Nichols, Printemps.
+
+Return ONLY valid JSON with these exact keys: buyer, store, item, quantity, price, currency, email.
+If email was not mentioned, set it to null."""
 
     raw = _call_llm(system, transcript, json_mode=True)
     try:
@@ -124,15 +161,20 @@ def agent_inventory_check(extracted: dict) -> dict:
 # ─── Agent 3: Deal Strategist ───
 
 def agent_strategist(extracted: dict, inventory_report: dict) -> dict:
-    """Decide: ACCEPT / COUNTER-OFFER / UPSELL based on inventory report."""
+    """Decide: ACCEPT / COUNTER-OFFER / UPSELL / SUSPEND based on inventory report."""
     system = """You are a luxury fashion deal strategist for Paris Fashion Week B2B negotiations.
-Based on the inventory report, decide one of three actions:
+Based on the inventory report, decide one of four actions:
 - ACCEPT: stock sufficient and margin healthy. Approve the deal as-is.
 - COUNTER: stock insufficient OR margin too low. Suggest adjusted quantity and/or price.
 - UPSELL: stock is very high (>2x requested) and margin healthy. Suggest the buyer takes more.
+- SUSPEND: use when the situation is uncertain — for example:
+  * Price is below target but not unacceptable (could work if no better offers come)
+  * Stock is limited and you're unsure if restocking will happen before Fashion Week ends
+  * The deal is borderline — worth holding rather than rejecting or accepting immediately
+  SUSPEND means "hold this deal for later decision, don't deduct stock, don't confirm yet."
 
 Return ONLY valid JSON with these keys:
-- action: "ACCEPT" or "COUNTER" or "UPSELL"
+- action: "ACCEPT" or "COUNTER" or "UPSELL" or "SUSPEND"
 - reasoning: 2-3 sentence explanation
 - suggested_quantity: the recommended quantity (same as original if ACCEPT)
 - suggested_price: the recommended price per unit (same as original if ACCEPT)
@@ -186,7 +228,64 @@ Total: €{strategy.get('suggested_quantity', extracted.get('quantity', 0)) * st
     return _call_llm(system, context, json_mode=False)
 
 
+# ─── Voice Command Detection ───
+
+# Keywords that trigger actions via voice instead of button clicks
+VOICE_COMMANDS = {
+    "confirm": ["confirm", "confirmed", "approve", "approved", "accept", "accepted", "go ahead", "let's do it", "deal", "done deal", "validate"],
+    "suspend": ["suspend", "suspended", "hold", "hold on", "put on hold", "wait", "pause", "not sure", "hold that", "keep it"],
+}
+
+
+def detect_voice_command(transcript: str) -> str | None:
+    """Check if transcript is a voice command rather than a new deal.
+    Returns 'confirm', 'suspend', or None (meaning it's a regular deal transcript).
+    Only matches if the transcript is SHORT (< 15 words) — longer utterances are deals."""
+    text = transcript.strip().lower()
+    words = text.split()
+
+    # Long utterances are always deals, not commands
+    if len(words) > 15:
+        return None
+
+    for action, keywords in VOICE_COMMANDS.items():
+        for kw in keywords:
+            if kw in text:
+                return action
+
+    return None
+
+
 # ─── Pipeline Runner ───
+
+
+def agent_receipt(extracted: dict, strategy: dict, order_id: int) -> str:
+    """Generate a formal payment receipt for confirmed orders."""
+    system = """You are a luxury fashion finance coordinator for a prestigious Parisian maison.
+Generate a formal PAYMENT RECEIPT (not a confirmation email) for a confirmed B2B order.
+
+Rules:
+- Format as a structured receipt with clear line items
+- Include: Receipt number (use the order ID provided), date, buyer info, item details, unit price, quantity, subtotal, and total
+- Add a "Payment Terms: Net 30" line
+- Include "Maison AURA — Paris Fashion Week" as the issuing entity
+- Keep it professional, clean, and structured — like a Chanel invoice, not a Shopify receipt
+- Use plain text formatting with clear sections
+
+Return ONLY the receipt text, no JSON wrapping."""
+
+    from datetime import datetime
+    context = f"""ORDER #{order_id}:
+Date: {datetime.now().strftime('%d %B %Y')}
+Buyer: {extracted.get('buyer', 'Valued Client')}
+Store: {extracted.get('store', '')}
+Item: {extracted.get('item', 'item')}
+Quantity: {strategy.get('suggested_quantity', extracted.get('quantity', 0))} units
+Unit Price: EUR {strategy.get('suggested_price', extracted.get('price', 0)):,.2f}
+Total: EUR {strategy.get('suggested_quantity', extracted.get('quantity', 0)) * strategy.get('suggested_price', extracted.get('price', 0)):,.2f}"""
+
+    return _call_llm(system, context, json_mode=False)
+
 
 async def run_pipeline(transcript: str, send_log):
     """Run all agents sequentially, sending logs after each step.
@@ -218,7 +317,7 @@ async def run_pipeline(transcript: str, send_log):
     # Agent 3 — Strategy
     strategy = agent_strategist(extracted, inventory_report)
     action = strategy.get("action", "COUNTER")
-    emoji = {"ACCEPT": "✅", "COUNTER": "⚡", "UPSELL": "📈"}.get(action, "⚡")
+    emoji = {"ACCEPT": "✅", "COUNTER": "⚡", "UPSELL": "📈", "SUSPEND": "⏸️"}.get(action, "⚡")
     sq = strategy.get("suggested_quantity", extracted.get("quantity", "?"))
     sp = strategy.get("suggested_price", extracted.get("price", "?"))
     total = sq * sp if isinstance(sq, (int, float)) and isinstance(sp, (int, float)) else "?"
