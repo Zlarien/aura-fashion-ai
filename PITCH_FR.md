@@ -21,7 +21,7 @@
 **[Action: Press Shift+D to trigger demo mode — OR speak into mic if using live mode]**
 
 Phrase de démo (à dire ou déclencher) :
-> *"Sophie Laurent de chez Harrods veut 150 unités de l'Obsidian Trench à 1200 euros."*
+> *"Sophie Laurent de chez Galerie Verlaine veut 150 unités de l'Obsidian Trench à 1200 euros."*
 
 **[Point to screen as agents cascade:]**
 
@@ -91,7 +91,7 @@ Phrase de démo (à dire ou déclencher) :
 
 **[Action: On Tab 1, confirm the current deal. Point to Tab 2.]**
 
-> "L'onglet 2 voit le stock se mettre à jour instantanément — et reçoit une notification : 'Sophie vient de confirmer 120 Obsidian Trenches pour Harrods'. Pas de synchro manuelle. Pas de tableur. Du temps réel."
+> "L'onglet 2 voit le stock se mettre à jour instantanément — et reçoit une notification : 'Sophie vient de confirmer 120 Obsidian Trenches pour Galerie Verlaine'. Pas de synchro manuelle. Pas de tableur. Du temps réel."
 
 **[Point to: Gold toast on Tab 2, inventory updating live, rep count badge]**
 

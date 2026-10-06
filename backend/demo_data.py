@@ -3,11 +3,11 @@ AURA — Demo Mode Pre-baked Data
 Golden responses for Shift+D demo mode — bypasses all APIs.
 """
 
-DEMO_TRANSCRIPT = "Aura, Sophie Laurent from Harrods is interested in 150 units of the Obsidian Trench coat at 1200 euros"
+DEMO_TRANSCRIPT = "Aura, Sophie Laurent from Galerie Verlaine is interested in 150 units of the Obsidian Trench coat at 1200 euros"
 
 DEMO_AGENT1_RESULT = {
     "buyer": "Sophie Laurent",
-    "store": "Harrods",
+    "store": "Galerie Verlaine",
     "item": "Obsidian Trench",
     "quantity": 150,
     "price": 1200.00,
@@ -33,7 +33,7 @@ DEMO_AGENT2_RESULT = {
 
 DEMO_AGENT3_RESULT = {
     "action": "COUNTER",
-    "reasoning": "Stock limited to 120 units — cannot fulfill 150. Margin is healthy at 41.2%, above the 35% floor. Recommend counter-offering at 120 units with a slight price increase to €1,350 to compensate for exclusivity of reduced allocation. This preserves the relationship with Harrods while maximizing revenue on available stock.",
+    "reasoning": "Stock limited to 120 units — cannot fulfill 150. Margin is healthy at 41.2%, above the 35% floor. Recommend counter-offering at 120 units with a slight price increase to €1,350 to compensate for exclusivity of reduced allocation. This preserves the relationship with Galerie Verlaine while maximizing revenue on available stock.",
     "suggested_quantity": 120,
     "suggested_price": 1350.00,
     "original_quantity": 150,
@@ -41,7 +41,7 @@ DEMO_AGENT3_RESULT = {
     "voice_summary": "Stock confirmed at 120 units, not 150. Margin is strong. I suggest counter-offering at 120 units at 1350 euros — that's a premium for the exclusivity of the limited allocation.",
 }
 
-DEMO_AGENT4_EMAIL = """Subject: Order Confirmation — Obsidian Trench | Harrods × Maison AURA
+DEMO_AGENT4_EMAIL = """Subject: Order Confirmation — Obsidian Trench | Galerie Verlaine × Maison AURA
 
 Dear Ms. Laurent,
 
@@ -53,7 +53,7 @@ Order Details:
 • Agreed Price: €1,350 per unit
 • Total Value: €162,000
 
-Your allocation has been secured from our atelier's limited production run. Each piece will be individually inspected before dispatch to ensure it meets the exacting standards that both Harrods and Maison AURA are known for.
+Your allocation has been secured from our atelier's limited production run. Each piece will be individually inspected before dispatch to ensure it meets the exacting standards that both Galerie Verlaine and Maison AURA are known for.
 
 Estimated delivery to your Knightsbridge location: 4–6 weeks from confirmation.
 
@@ -70,7 +70,7 @@ DEMO_AGENT_LOGS = [
     {
         "agent": 1,
         "label": "EXTRACTOR",
-        "content": "✓ Buyer: Sophie Laurent | Store: Harrods | Item: Obsidian Trench | Qty: 150 | Price: €1,200",
+        "content": "✓ Buyer: Sophie Laurent | Store: Galerie Verlaine | Item: Obsidian Trench | Qty: 150 | Price: €1,200",
     },
     {
         "agent": 2,

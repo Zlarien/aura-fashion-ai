@@ -21,7 +21,7 @@
 **[Action: Press Shift+D to trigger demo mode — OR speak into mic if using live mode]**
 
 Demo sentence (say or trigger):
-> *"Sophie Laurent from Harrods wants 150 units of the Obsidian Trench at 1200 euros."*
+> *"Sophie Laurent from Galerie Verlaine wants 150 units of the Obsidian Trench at 1200 euros."*
 
 **[Point to screen as agents cascade:]**
 
@@ -91,7 +91,7 @@ Demo sentence (say or trigger):
 
 **[Action: On Tab 1, confirm the current deal. Point to Tab 2.]**
 
-> "Tab 2 sees the stock update instantly — and gets a notification: 'Sophie just confirmed 120 Obsidian Trenches for Harrods.' No manual sync. No spreadsheet. Real-time."
+> "Tab 2 sees the stock update instantly — and gets a notification: 'Sophie just confirmed 120 Obsidian Trenches for Galerie Verlaine.' No manual sync. No spreadsheet. Real-time."
 
 **[Point to: Gold toast on Tab 2, inventory updating live, rep count badge]**
 
