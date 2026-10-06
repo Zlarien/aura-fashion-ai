@@ -1,5 +1,7 @@
 # AURA
 
+<p align="center"><img src="docs/demo.gif" width="90%"/></p>
+
 A voice co-pilot for luxury fashion showrooms, inspired by Paris Fashion Week. A sales rep speaks a deal ("Sophie Laurent from Harrods wants 150 units of the Obsidian Trench at 1200 euros"), and AURA extracts it, checks stock and margin, proposes a counter-offer or an alternative item, and drafts the confirmation email once the buyer agrees.
 
 **Status:** Hackathon prototype, never deployed.
